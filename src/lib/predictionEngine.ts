@@ -11,6 +11,16 @@ import {
   gridToBool,
 } from '@/lib/blockUtils';
 import { BLOCK_CATALOG } from '@/data/blockCatalog';
+import {
+  bossCache,
+  suggestionsCache,
+  nextBlocksCache,
+  placabilityCache,
+  gridFingerprint,
+  blockFingerprint,
+  handGridKey,
+  memoryFingerprint,
+} from '@/lib/aiCache';
 
 const GRID_SIZE = 8;
 
@@ -472,19 +482,45 @@ function suggestionsForBlock(
 // ─── Identification du Boss ───────────────────────────────────────────────────
 
 /**
- * Identifie le slot "boss" : le bloc le plus grand de la main.
- * Par convention du jeu, c'est toujours le slot du milieu (index 1).
- * On vérifie quand même par taille pour être robuste.
+ * Identifie le slot "boss" : le plus grand bloc de la main QUI PEUT ÊTRE PLACÉ sur la grille.
+ * Si aucun bloc n'est plaçable, retourne le slot du plus grand bloc (par défaut : 1).
+ * Cela évite de couronner Boss un bloc qui n'a aucune place sur la grille.
  */
-export function findBossSlot(hand: Array<BlockInstance | null>): number {
+export function findBossSlot(hand: Array<BlockInstance | null>, grid?: Grid): number {
+  const boolGrid = grid ? gridToBool(grid) : null;
+
+  // Filtrer les blocs plaçables si on a la grille
+  let candidates = hand.map((block, idx) => ({ block, idx })).filter(x => x.block !== null);
+
+  if (boolGrid) {
+    const placeable = candidates.filter(({ block }) => {
+      if (!block) return false;
+      const transforms = getUniqueTransforms(block.definition, block.color);
+      for (const t of transforms) {
+        const shape = getInstanceShape(t);
+        for (let r = 0; r < GRID_SIZE; r++) {
+          for (let c = 0; c < GRID_SIZE; c++) {
+            if (canPlace(boolGrid, shape, r, c)) return true;
+          }
+        }
+      }
+      return false;
+    });
+    // N'utiliser que les blocs plaçables pour choisir le boss
+    if (placeable.length > 0) candidates = placeable;
+  }
+
+  if (candidates.length === 0) return 1; // main vide → défaut milieu
+
+  // Parmi les candidats plaçables, choisir le plus grand
   let maxSize = -1;
-  let bossIdx = 1; // par défaut : milieu
-  hand.forEach((block, idx) => {
+  let bossIdx = 1;
+  for (const { block, idx } of candidates) {
     if (block && block.definition.size > maxSize) {
       maxSize = block.definition.size;
       bossIdx = idx;
     }
-  });
+  }
   return bossIdx;
 }
 
@@ -492,6 +528,7 @@ export function findBossSlot(hand: Array<BlockInstance | null>): number {
  * Calcule la meilleure zone réservée pour le bloc boss sur la grille actuelle.
  * Cherche la position qui maximise le potentiel de combo futur pour le boss.
  * Retourne null si aucune position valide n'existe.
+ * Résultat mis en cache par empreinte grille + bloc boss.
  */
 export function computeBossReservation(
   grid: Grid,
@@ -500,6 +537,16 @@ export function computeBossReservation(
   memory: ClearMemory[] = []
 ): BossReservation | null {
   const boolGrid = gridToBool(grid);
+
+  // Clé de cache : empreinte grille + bloc + mémoire
+  const fp = gridFingerprint(boolGrid);
+  const bfp = blockFingerprint(bossBlock.definition.id, bossBlock.rotation, bossBlock.flipped, bossBlock.color);
+  const mfp = memoryFingerprint(memory);
+  const cacheKey = `boss:${fp}|${bfp}|slot${bossSlot}|${mfp}`;
+
+  const cached = bossCache.get(cacheKey);
+  if (cached !== undefined) return cached as BossReservation | null;
+
   const transforms = getUniqueTransforms(bossBlock.definition, bossBlock.color);
 
   let bestScore = -Infinity;
@@ -526,6 +573,7 @@ export function computeBossReservation(
     }
   }
 
+  bossCache.set(cacheKey, bestResult);
   return bestResult;
 }
 
@@ -542,6 +590,7 @@ export function reservationToCellSet(reservation: BossReservation | null): Set<s
 /**
  * Génère les meilleures suggestions pour les 3 blocs de la main.
  * Respecte la zone réservée du boss et intègre la mémoire contextuelle.
+ * Résultat mis en cache par empreinte grille + main + mémoire.
  */
 export function generateSuggestions(
   grid: Grid,
@@ -551,9 +600,22 @@ export function generateSuggestions(
   memory: ClearMemory[] = []
 ): Record<number, Suggestion[]> {
   const boolGrid = gridToBool(grid);
+  const fp = gridFingerprint(boolGrid);
+  const handIds = hand.map(b =>
+    b ? blockFingerprint(b.definition.id, b.rotation, b.flipped, b.color) : null
+  );
+  const mfp = memoryFingerprint(memory);
+  const bossFp = bossReservation
+    ? `${bossReservation.row},${bossReservation.col},${bossReservation.bossSlot}`
+    : 'none';
+  const cacheKey = handGridKey(fp, handIds, mfp) + `|boss:${bossFp}|max:${maxPerBlock}`;
+
+  const cached = suggestionsCache.get(cacheKey);
+  if (cached !== undefined) return cached as Record<number, Suggestion[]>;
+
   const result: Record<number, Suggestion[]> = {};
   const reservedCells = reservationToCellSet(bossReservation);
-  const bossSlot = bossReservation?.bossSlot ?? findBossSlot(hand);
+  const bossSlot = bossReservation?.bossSlot ?? findBossSlot(hand, grid);
 
   hand.forEach((block, slotIndex) => {
     if (!block) { result[slotIndex] = []; return; }
@@ -561,23 +623,36 @@ export function generateSuggestions(
     result[slotIndex] = suggestionsForBlock(block, boolGrid, maxPerBlock, reservedCells, memory, isBoss);
   });
 
+  suggestionsCache.set(cacheKey, result);
   return result;
 }
 
 /**
  * Vérifie si un bloc peut être placé quelque part sur la grille.
+ * Résultat mis en cache.
  */
 export function canBlockBePlaced(grid: Grid, block: BlockInstance): boolean {
   const boolGrid = gridToBool(grid);
+  const fp = gridFingerprint(boolGrid);
+  const bfp = blockFingerprint(block.definition.id, block.rotation, block.flipped, block.color);
+  const cacheKey = `place:${fp}|${bfp}`;
+
+  const cached = placabilityCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
   const transforms = getUniqueTransforms(block.definition, block.color);
   for (const transform of transforms) {
     const shape = getInstanceShape(transform);
     for (let row = 0; row < GRID_SIZE; row++) {
       for (let col = 0; col < GRID_SIZE; col++) {
-        if (canPlace(boolGrid, shape, row, col)) return true;
+        if (canPlace(boolGrid, shape, row, col)) {
+          placabilityCache.set(cacheKey, true);
+          return true;
+        }
       }
     }
   }
+  placabilityCache.set(cacheKey, false);
   return false;
 }
 
@@ -585,6 +660,7 @@ export function canBlockBePlaced(grid: Grid, block: BlockInstance): boolean {
  * Suggère automatiquement 3 nouveaux blocs pour recharger la main.
  * GARANTIT que le slot 1 (milieu) reçoit le plus grand bloc (le nouveau boss).
  * Slots 0 et 2 reçoivent des blocs plus petits compatibles.
+ * Résultat mis en cache par empreinte grille.
  */
 export function suggestNextBlocks(
   grid: Grid,
@@ -592,6 +668,11 @@ export function suggestNextBlocks(
   count = 3
 ): BlockInstance[] {
   const boolGrid = gridToBool(grid);
+  const fp = gridFingerprint(boolGrid);
+  const cacheKey = `next:${fp}|${colors.slice(0, 3).join(',')}|${count}`;
+
+  const cached = nextBlocksCache.get(cacheKey);
+  if (cached !== undefined) return cached as BlockInstance[];
 
   // Scorer chaque bloc du catalogue sur son MEILLEUR placement possible
   const scored = BLOCK_CATALOG.map((def, idx) => {
@@ -654,9 +735,12 @@ export function suggestNextBlocks(
     // Après tri ascendant : [0]=petit, [1]=moyen, [2]=grand
     // On veut : [0]=petit, [1]=grand(boss), [2]=moyen
     const [small, medium, large] = selected;
-    return [small, large, medium];
+    const result = [small, large, medium];
+    nextBlocksCache.set(cacheKey, result);
+    return result;
   }
 
+  nextBlocksCache.set(cacheKey, selected);
   return selected;
 }
 
