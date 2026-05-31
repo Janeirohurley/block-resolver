@@ -24,7 +24,7 @@ import { useActivityLog } from '@/hooks/useActivityLog';
 import { ThemeProvider, useTheme } from '@/contexts/ThemeContext';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { LayoutGrid, Info, Puzzle, Sparkles, Hand, Trophy, Zap, ChevronDown, ChevronUp } from 'lucide-react';
+import { LayoutGrid, Info, Puzzle, Sparkles, Hand, Trophy, Zap, ChevronDown, ChevronUp, ShieldAlert } from 'lucide-react';
 
 const GRID_SIZE = 8;
 const MAX_MEMORY = 5;
@@ -212,11 +212,22 @@ const BlockPuzzleAssistant: React.FC = () => {
         const total = Object.values(result).flat().length;
         const ms = Date.now() - t0;
         const fromCache = ms < 5;
+        // Vérifier si le boss est en dernier recours
+        const bossSlotLocal = bossReservation?.bossSlot ?? findBossSlot(hand, grid);
+        const nonBossTotal = Object.entries(result)
+          .filter(([idx]) => parseInt(idx) !== bossSlotLocal)
+          .reduce((acc, [, arr]) => acc + arr.length, 0);
+        const isLastResort = nonBossTotal === 0 && (result[bossSlotLocal]?.length ?? 0) > 0;
         finishActivity(actId, fromCache ? 'cached' : 'done',
-          `${total} suggestion${total > 1 ? 's' : ''} ${fromCache ? '(cache)' : `en ${ms} ms`}`);
+          `${total} suggestion${total > 1 ? 's' : ''} ${isLastResort ? '⚠ Boss dernier recours' : ''} ${fromCache ? '(cache)' : `en ${ms} ms`}`.trim());
         refreshCacheStats();
         if (total === 0) {
           toast.warning('Aucun placement possible', { description: 'La grille est trop remplie.' });
+        } else if (isLastResort) {
+          toast.warning('⚠ Dernier recours — Boss obligatoire', {
+            description: 'Les blocs gauche/droite ne peuvent plus être posés.',
+            duration: 3500,
+          });
         } else {
           toast.success(`${total} suggestion${total > 1 ? 's' : ''} trouvée${total > 1 ? 's' : ''}`, {
             description: fromCache ? '⚡ Résultat instantané (cache IA)' : 'Survolez une carte pour prévisualiser.',
@@ -453,6 +464,12 @@ const BlockPuzzleAssistant: React.FC = () => {
   const bossBlock = hand[bossSlot];
   const bossColor = bossBlock?.color ?? theme.accentColor;
 
+  // Boss = dernier recours seulement si aucun bloc non-boss n'a de suggestion
+  const nonBossHasSuggestions = hand.some((block, idx) =>
+    block !== null && idx !== bossSlot && (suggestions[idx]?.length ?? 0) > 0
+  );
+  const bossIsLastResort = hasAnalyzed && !nonBossHasSuggestions && (suggestions[bossSlot]?.length ?? 0) > 0;
+
   return (
     <div
       className="flex flex-col min-h-screen bg-background"
@@ -665,17 +682,31 @@ const BlockPuzzleAssistant: React.FC = () => {
               />
               {bossReservation && bossBlock && (
                 <div className="mb-3 flex-shrink-0 p-2 rounded-md border text-xs"
-                  style={{ borderColor: `${bossColor}40`, background: `${bossColor}08` }}>
-                  <div className="flex items-center gap-1.5 font-medium mb-0.5" style={{ color: bossColor }}>
-                    <span>👑 Boss — {bossBlock.definition.name}</span>
+                  style={{
+                    borderColor: bossIsLastResort ? `#ef444460` : `${bossColor}40`,
+                    background: bossIsLastResort ? `#ef444408` : `${bossColor}08`,
+                  }}>
+                  <div className="flex items-center gap-1.5 font-medium mb-0.5"
+                    style={{ color: bossIsLastResort ? '#ef4444' : bossColor }}>
+                    {bossIsLastResort
+                      ? <ShieldAlert className="h-3 w-3 flex-shrink-0" />
+                      : <span>👑</span>
+                    }
+                    <span>Boss — {bossBlock.definition.name}</span>
                     <Badge className="text-[9px] px-1 h-4 ml-auto"
-                      style={{ background: `${bossColor}20`, color: bossColor, border: `1px solid ${bossColor}40` }}>
+                      style={{
+                        background: bossIsLastResort ? `#ef444420` : `${bossColor}20`,
+                        color: bossIsLastResort ? '#ef4444' : bossColor,
+                        border: `1px solid ${bossIsLastResort ? '#ef444440' : `${bossColor}40`}`,
+                      }}>
                       {bossBlock.definition.size} cases
                     </Badge>
                   </div>
                   <p className="text-muted-foreground leading-snug">
-                    Zone réservée à L{bossReservation.row + 1}&nbsp;C{bossReservation.col + 1}.
-                    Les blocs gauche/droite évitent cette zone.
+                    {bossIsLastResort
+                      ? <>⚠ <strong className="text-foreground">Dernier recours</strong> — aucun autre bloc disponible. Utilisez le Boss maintenant.</>
+                      : <>Zone réservée à L{bossReservation.row + 1}&nbsp;C{bossReservation.col + 1}. Posez d&apos;abord les blocs gauche/droite.</>
+                    }
                   </p>
                 </div>
               )}

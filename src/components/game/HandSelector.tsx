@@ -116,7 +116,7 @@ const HandSlot: React.FC<HandSlotProps> = ({
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
             className={cn(
-              'flex items-center justify-center min-h-[56px] cursor-grab active:cursor-grabbing',
+              'flex items-center justify-center min-h-[72px] cursor-grab active:cursor-grabbing',
               'rounded-md px-2 py-1 hover:bg-muted/40 transition-colors select-none',
               'focus:outline-none focus:ring-2 focus:ring-primary/50'
             )}
@@ -130,7 +130,7 @@ const HandSlot: React.FC<HandSlotProps> = ({
               color={block.color}
               rotation={block.rotation}
               flipped={block.flipped}
-              cellSize={14}
+              cellSize={18}
             />
           </div>
           <div className="text-xs font-medium text-foreground">{block.definition.name}</div>

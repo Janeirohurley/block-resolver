@@ -7,7 +7,7 @@ import { useDrag } from '@/contexts/DragContext';
 import { cn } from '@/lib/utils';
 
 const GRID_SIZE = 8;
-const CELL_SIZE = 36;
+const CELL_SIZE = 42;
 const CELL_GAP = 2;
 
 interface GameGridProps {

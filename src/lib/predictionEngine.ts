@@ -589,6 +589,11 @@ export function reservationToCellSet(reservation: BossReservation | null): Set<s
 
 /**
  * Génère les meilleures suggestions pour les 3 blocs de la main.
+ *
+ * RÈGLE DU DERNIER RECOURS :
+ *   Le Boss n'est suggéré que si AUCUN bloc non-boss n'a de placement disponible.
+ *   Tant qu'au moins un bloc non-boss peut être posé, le Boss est supprimé des suggestions.
+ *
  * Respecte la zone réservée du boss et intègre la mémoire contextuelle.
  * Résultat mis en cache par empreinte grille + main + mémoire.
  */
@@ -617,10 +622,30 @@ export function generateSuggestions(
   const reservedCells = reservationToCellSet(bossReservation);
   const bossSlot = bossReservation?.bossSlot ?? findBossSlot(hand, grid);
 
+  // ── Étape 1 : calculer les suggestions pour tous les blocs ─────────────────
+  const rawResults: Record<number, Suggestion[]> = {};
+  hand.forEach((block, slotIndex) => {
+    if (!block) { rawResults[slotIndex] = []; return; }
+    const isBoss = slotIndex === bossSlot;
+    rawResults[slotIndex] = suggestionsForBlock(block, boolGrid, maxPerBlock, reservedCells, memory, isBoss);
+  });
+
+  // ── Étape 2 : vérifier si au moins un bloc NON-boss a des suggestions ──────
+  const nonBossHasPlacements = hand.some((block, slotIndex) => {
+    if (!block || slotIndex === bossSlot) return false;
+    return rawResults[slotIndex].length > 0;
+  });
+
+  // ── Étape 3 : appliquer la règle du dernier recours ────────────────────────
   hand.forEach((block, slotIndex) => {
     if (!block) { result[slotIndex] = []; return; }
     const isBoss = slotIndex === bossSlot;
-    result[slotIndex] = suggestionsForBlock(block, boolGrid, maxPerBlock, reservedCells, memory, isBoss);
+    if (isBoss && nonBossHasPlacements) {
+      // Des alternatives existent → on cache les suggestions du boss
+      result[slotIndex] = [];
+    } else {
+      result[slotIndex] = rawResults[slotIndex];
+    }
   });
 
   suggestionsCache.set(cacheKey, result);
