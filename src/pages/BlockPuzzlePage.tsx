@@ -1,4 +1,4 @@
-// Page principale de l'assistant Block Puzzle — v12 (Boss valide + Cache IA + Journal)
+// Page principale de l'assistant Block Puzzle — v15 (Boss valide + Cache IA + Journal + Notes IA + Persistance)
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { Grid, BlockInstance, Suggestion, CellState } from '@/types/types';
 import {
@@ -12,6 +12,9 @@ import {
 import type { ClearMemory, BossReservation } from '@/lib/predictionEngine';
 import { getAllCacheStats, clearAllCaches } from '@/lib/aiCache';
 import type { CacheStats } from '@/lib/aiCache';
+import { parseNotesToHints } from '@/lib/aiNotes';
+import { useAiNotes } from '@/hooks/useAiNotes';
+import { useGamePersistence, loadGameState, hydrateState, clearGameState } from '@/hooks/useGamePersistence';
 import { getInstanceShape, gridToBool, canPlace, applyPlacementWithClears } from '@/lib/blockUtils';
 import { DragProvider } from '@/contexts/DragContext';
 import { GameGrid } from '@/components/game/GameGrid';
@@ -20,11 +23,12 @@ import { SuggestionsPanel } from '@/components/game/SuggestionsPanel';
 import { GridToolbar } from '@/components/game/GridToolbar';
 import { ThemeConfigPanel } from '@/components/game/ThemeConfigPanel';
 import { ActivityPanel } from '@/components/game/ActivityPanel';
+import { AiNotesPanel } from '@/components/game/AiNotesPanel';
 import { useActivityLog } from '@/hooks/useActivityLog';
 import { ThemeProvider, useTheme } from '@/contexts/ThemeContext';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { LayoutGrid, Info, Puzzle, Sparkles, Hand, Trophy, Zap, ChevronDown, ChevronUp, ShieldAlert } from 'lucide-react';
+import { LayoutGrid, Info, Puzzle, Sparkles, Hand, Trophy, Zap, ChevronDown, ChevronUp, ShieldAlert, BookOpen, Save } from 'lucide-react';
 
 const GRID_SIZE = 8;
 const MAX_MEMORY = 5;
@@ -42,10 +46,18 @@ const BlockPuzzleAssistant: React.FC = () => {
   const { theme } = useTheme();
   const { entries: activityEntries, startActivity, finishActivity, logInstant, clearLog } = useActivityLog();
 
-  const [grid, setGrid] = useState<Grid>(createEmptyGrid);
+  // ── Notes d'apprentissage IA (persistées en localStorage) ────────────────
+  const { notes, addNote, removeNote, toggleNote, clearAllNotes, activeCount: activeNotesCount } = useAiNotes();
+  const [showNotes, setShowNotes] = useState(false);
+
+  // ── Restauration de la partie précédente ─────────────────────────────────
+  const savedState = loadGameState();
+  const hydrated = savedState ? hydrateState(savedState) : null;
+
+  const [grid, setGrid] = useState<Grid>(() => hydrated?.grid ?? createEmptyGrid());
   const [paintMode, setPaintMode] = useState<'paint' | 'erase'>('paint');
   const [selectedColor, setSelectedColor] = useState(theme.blockColors[0]);
-  const [hand, setHand] = useState<Array<BlockInstance | null>>([null, null, null]);
+  const [hand, setHand] = useState<Array<BlockInstance | null>>(() => hydrated?.hand ?? [null, null, null]);
   const [suggestions, setSuggestions] = useState<Record<number, Suggestion[]>>({});
   const [hoveredSuggestion, setHoveredSuggestion] = useState<Suggestion | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -55,7 +67,7 @@ const BlockPuzzleAssistant: React.FC = () => {
   const [showActivityLog, setShowActivityLog] = useState(true);
 
   // ── Score & animation ────────────────────────────────────────────────────
-  const [score, setScore] = useState(0);
+  const [score, setScore] = useState(() => hydrated?.score ?? 0);
   const [scoreBump, setScoreBump] = useState(false);
   const [explodingCells, setExplodingCells] = useState<Set<string>>(new Set());
   const [scorePopup, setScorePopup] = useState<{ value: number; key: number } | null>(null);
@@ -63,10 +75,10 @@ const BlockPuzzleAssistant: React.FC = () => {
   const explodeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Stratégie Boss ───────────────────────────────────────────────────────
-  const [bossSlot, setBossSlot] = useState<number>(1);
-  const [bossReservation, setBossReservation] = useState<BossReservation | null>(null);
-  const [clearMemory, setClearMemory] = useState<ClearMemory[]>([]);
-  const turnCountRef = useRef(0);
+  const [bossSlot, setBossSlot] = useState<number>(() => hydrated?.bossSlot ?? 1);
+  const [bossReservation, setBossReservation] = useState<BossReservation | null>(() => hydrated?.bossReservation ?? null);
+  const [clearMemory, setClearMemory] = useState<ClearMemory[]>(() => hydrated?.clearMemory ?? []);
+  const turnCountRef = useRef(hydrated?.turnCount ?? 0);
 
   // ── Cache stats ──────────────────────────────────────────────────────────
   const [cacheStats, setCacheStats] = useState<CacheStats>({ hits: 0, misses: 0, entries: 0, hitRate: 0 });
@@ -74,6 +86,22 @@ const BlockPuzzleAssistant: React.FC = () => {
   const refreshCacheStats = useCallback(() => {
     setCacheStats(getAllCacheStats().combined);
   }, []);
+
+  // Toast de restauration
+  useEffect(() => {
+    if (hydrated) {
+      logInstant('Partie restaurée', 'done', `Score : ${hydrated.score.toLocaleString()}`);
+      toast.success('🔄 Partie restaurée', {
+        description: `Score : ${hydrated.score.toLocaleString()} — ${hydrated.grid.flat().filter(c => c.occupied).length} cases occupées.`,
+        duration: 3500,
+      });
+    }
+  // Intentionnellement vide — s'exécute une seule fois au montage
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Persistance automatique de la partie ────────────────────────────────
+  useGamePersistence({ grid, hand, score, bossSlot, clearMemory, turnCount: turnCountRef.current, bossReservation });
 
   // ── Recalcul Boss (avec vérification de placement valide) ────────────────
   const recomputeBoss = useCallback(
@@ -206,7 +234,8 @@ const BlockPuzzleAssistant: React.FC = () => {
     const t0 = Date.now();
     setTimeout(() => {
       try {
-        const result = generateSuggestions(grid, hand, 3, bossReservation, clearMemory);
+        const hints = parseNotesToHints(notes);
+        const result = generateSuggestions(grid, hand, 3, bossReservation, clearMemory, hints);
         setSuggestions(result);
         setHasAnalyzed(true);
         const total = Object.values(result).flat().length;
@@ -219,7 +248,7 @@ const BlockPuzzleAssistant: React.FC = () => {
           .reduce((acc, [, arr]) => acc + arr.length, 0);
         const isLastResort = nonBossTotal === 0 && (result[bossSlotLocal]?.length ?? 0) > 0;
         finishActivity(actId, fromCache ? 'cached' : 'done',
-          `${total} suggestion${total > 1 ? 's' : ''} ${isLastResort ? '⚠ Boss dernier recours' : ''} ${fromCache ? '(cache)' : `en ${ms} ms`}`.trim());
+          `${total} suggestion${total > 1 ? 's' : ''} ${isLastResort ? '⚠ Boss dernier recours' : ''} ${activeNotesCount > 0 ? `📝×${activeNotesCount}` : ''} ${fromCache ? '(cache)' : `en ${ms} ms`}`.trim());
         refreshCacheStats();
         if (total === 0) {
           toast.warning('Aucun placement possible', { description: 'La grille est trop remplie.' });
@@ -240,7 +269,7 @@ const BlockPuzzleAssistant: React.FC = () => {
         setIsAnalyzing(false);
       }
     }, 50);
-  }, [grid, hand, bossReservation, clearMemory, startActivity, finishActivity, refreshCacheStats]);
+  }, [grid, hand, bossReservation, clearMemory, notes, activeNotesCount, startActivity, finishActivity, refreshCacheStats]);
 
   // ── Effacer la grille ────────────────────────────────────────────────────
   const handleClearGrid = useCallback(() => {
@@ -256,9 +285,10 @@ const BlockPuzzleAssistant: React.FC = () => {
     setClearMemory([]);
     turnCountRef.current = 0;
     clearAllCaches();
+    clearGameState();
     clearLog();
     refreshCacheStats();
-    logInstant('Grille réinitialisée', 'done', 'Cache IA vidé');
+    logInstant('Grille réinitialisée', 'done', 'Cache IA + sauvegarde effacés');
     toast.info('Grille effacée');
   }, [clearLog, logInstant, refreshCacheStats]);
 
@@ -518,6 +548,10 @@ const BlockPuzzleAssistant: React.FC = () => {
               style={{ borderColor: `${theme.accentColor}40` }}>
               8 × 8
             </Badge>
+            <span className="text-[10px] text-muted-foreground hidden md:flex items-center gap-1" title="Partie sauvegardée automatiquement">
+              <Save className="h-3 w-3" />
+              Auto-sauvegarde
+            </span>
             <ThemeConfigPanel />
           </div>
         </div>
@@ -719,6 +753,42 @@ const BlockPuzzleAssistant: React.FC = () => {
                   onHoverSuggestion={handleHoverSuggestion}
                   onApplySuggestion={handleApplySuggestion}
                 />
+              </div>
+
+              {/* ── Séparateur ── */}
+              <div className="h-px w-full bg-border my-3 flex-shrink-0" />
+
+              {/* ── Notes d'apprentissage IA ── */}
+              <div className="flex-shrink-0">
+                <button
+                  className="w-full flex items-center gap-2 mb-2 hover:opacity-80 transition-opacity"
+                  onClick={() => setShowNotes(v => !v)}
+                >
+                  <BookOpen className="h-3.5 w-3.5 flex-shrink-0 text-primary" />
+                  <span className="text-xs font-semibold text-foreground flex-1 text-left">
+                    Plan d&apos;apprentissage IA
+                  </span>
+                  {activeNotesCount > 0 && (
+                    <Badge variant="secondary" className="text-[10px] px-1.5 h-4 text-primary border-primary/30">
+                      {activeNotesCount}
+                    </Badge>
+                  )}
+                  <Save className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                  {showNotes
+                    ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                    : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                  }
+                </button>
+                {showNotes && (
+                  <AiNotesPanel
+                    notes={notes}
+                    activeCount={activeNotesCount}
+                    onAdd={addNote}
+                    onRemove={removeNote}
+                    onToggle={toggleNote}
+                    onClearAll={clearAllNotes}
+                  />
+                )}
               </div>
             </div>
           </div>

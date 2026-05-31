@@ -21,6 +21,8 @@ import {
   handGridKey,
   memoryFingerprint,
 } from '@/lib/aiCache';
+import type { UserHints } from '@/lib/aiNotes';
+import { DEFAULT_HINTS } from '@/lib/aiNotes';
 
 const GRID_SIZE = 8;
 
@@ -329,6 +331,7 @@ interface CandidateScore {
  * - De l'espérance future via catalogue
  * - De la zone réservée boss (pénalité si empiètement)
  * - De la mémoire contextuelle (bonus si continuité stratégique)
+ * - Des notes d'apprentissage utilisateur (hints)
  */
 function scoreCandidate(
   grid: boolean[][],
@@ -338,7 +341,8 @@ function scoreCandidate(
   color: string,
   reservedCells: Set<string> = new Set(),
   memory: ClearMemory[] = [],
-  isBossBlock = false
+  isBossBlock = false,
+  hints: UserHints = DEFAULT_HINTS
 ): CandidateScore {
   const { clearedLines, clearedCols } = getClears(grid, shape, row, col);
   const { grid: gridAfter, linesCleared, colsCleared } =
@@ -371,15 +375,12 @@ function scoreCandidate(
   }
 
   // ⑤ Bonus mémoire contextuelle
-  // Si on complète une ligne/col qui a été active récemment → on continue la bonne direction
   let memoryBonus = 0;
   if (memory.length > 0) {
     const recentLines = new Set(memory.flatMap(m => m.lines));
     const recentCols = new Set(memory.flatMap(m => m.cols));
-    // Lignes/cols qui seraient effacées ET qui continuent une direction active
     for (const l of clearedLines) if (recentLines.has(l)) memoryBonus += MEMORY_BONUS;
     for (const c of clearedCols) if (recentCols.has(c)) memoryBonus += MEMORY_BONUS;
-    // Bonus plus faible si on approche d'une ligne/col active (sans l'effacer)
     for (let r = 0; r < GRID_SIZE; r++) {
       if (recentLines.has(r)) {
         const filledAfter = gridAfter[r].filter(Boolean).length;
@@ -394,12 +395,57 @@ function scoreCandidate(
     }
   }
 
+  // ⑥ Bonus notes d'apprentissage utilisateur
+  let hintsBonus = 0;
+  if (hints.hasCustomHints) {
+    const cells = shape.map(([dr, dc]) => [row + dr, col + dc]);
+    const maxIdx = GRID_SIZE - 1;
+
+    if (hints.preferCorners || hints.preferEdges) {
+      // Bonus pour chaque case posée sur un bord ou coin
+      for (const [r, c] of cells) {
+        const onEdge = r === 0 || r === maxIdx || c === 0 || c === maxIdx;
+        const onCorner = (r === 0 || r === maxIdx) && (c === 0 || c === maxIdx);
+        if (onCorner && hints.preferCorners) hintsBonus += 12 * hints.cornerBonusMultiplier;
+        else if (onEdge && hints.preferEdges) hintsBonus += 6 * hints.cornerBonusMultiplier;
+      }
+    }
+
+    if (hints.avoidCenter) {
+      // Pénalité si le placement est centré (zone centrale 3x3)
+      const center = [3, 4];
+      const inCenter = cells.filter(([r, c]) => center.includes(r) && center.includes(c)).length;
+      if (inCenter > 0) hintsBonus -= inCenter * 15;
+    }
+
+    if (hints.preferRows && linesCleared > 0) {
+      hintsBonus += linesCleared * 30 * hints.rowBonusMultiplier;
+    }
+    if (hints.preferCols && colsCleared > 0) {
+      hintsBonus += colsCleared * 30 * hints.colBonusMultiplier;
+    }
+
+    if (hints.preferDense || hints.avoidSparse) {
+      // Bonus si le bloc est posé adjacent à d'autres blocs occupés
+      let adjacentFilled = 0;
+      for (const [r, c] of cells) {
+        for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+          const nr = r + dr; const nc = c + dc;
+          if (nr >= 0 && nr < GRID_SIZE && nc >= 0 && nc < GRID_SIZE && grid[nr][nc])
+            adjacentFilled++;
+        }
+      }
+      if (adjacentFilled > 0) hintsBonus += adjacentFilled * 5 * hints.densityBonusMultiplier;
+    }
+  }
+
   const totalScore =
     immediateScore * 1.0
     + setupScore_ * 2.5
     + futureScore * FUTURE_WEIGHT
     - reservedPenalty
-    + memoryBonus;
+    + memoryBonus
+    + hintsBonus;
 
   return {
     immediateScore,
@@ -423,7 +469,8 @@ function suggestionsForBlock(
   maxSuggestions = 5,
   reservedCells: Set<string> = new Set(),
   memory: ClearMemory[] = [],
-  isBossBlock = false
+  isBossBlock = false,
+  hints: UserHints = DEFAULT_HINTS
 ): Suggestion[] {
   const candidates: Suggestion[] = [];
   const transforms = getUniqueTransforms(block.definition, block.color);
@@ -435,7 +482,7 @@ function suggestionsForBlock(
       for (let col = 0; col < GRID_SIZE; col++) {
         if (!canPlace(grid, shape, row, col)) continue;
 
-        const s = scoreCandidate(grid, shape, row, col, block.color, reservedCells, memory, isBossBlock);
+        const s = scoreCandidate(grid, shape, row, col, block.color, reservedCells, memory, isBossBlock, hints);
 
         // Étiquette lisible du potentiel combo futur
         let comboLabel: string | undefined;
@@ -602,7 +649,8 @@ export function generateSuggestions(
   hand: Array<BlockInstance | null>,
   maxPerBlock = 3,
   bossReservation: BossReservation | null = null,
-  memory: ClearMemory[] = []
+  memory: ClearMemory[] = [],
+  hints: UserHints = DEFAULT_HINTS
 ): Record<number, Suggestion[]> {
   const boolGrid = gridToBool(grid);
   const fp = gridFingerprint(boolGrid);
@@ -613,7 +661,11 @@ export function generateSuggestions(
   const bossFp = bossReservation
     ? `${bossReservation.row},${bossReservation.col},${bossReservation.bossSlot}`
     : 'none';
-  const cacheKey = handGridKey(fp, handIds, mfp) + `|boss:${bossFp}|max:${maxPerBlock}`;
+  // La clé de cache intègre les hints actifs pour ne pas servir un cache périmé
+  const hintsFp = hints.hasCustomHints
+    ? `h:${hints.cornerBonusMultiplier.toFixed(1)}|${hints.rowBonusMultiplier.toFixed(1)}|${hints.colBonusMultiplier.toFixed(1)}|${hints.densityBonusMultiplier.toFixed(1)}|${hints.avoidCenter?1:0}`
+    : 'h:none';
+  const cacheKey = handGridKey(fp, handIds, mfp) + `|boss:${bossFp}|max:${maxPerBlock}|${hintsFp}`;
 
   const cached = suggestionsCache.get(cacheKey);
   if (cached !== undefined) return cached as Record<number, Suggestion[]>;
@@ -627,7 +679,7 @@ export function generateSuggestions(
   hand.forEach((block, slotIndex) => {
     if (!block) { rawResults[slotIndex] = []; return; }
     const isBoss = slotIndex === bossSlot;
-    rawResults[slotIndex] = suggestionsForBlock(block, boolGrid, maxPerBlock, reservedCells, memory, isBoss);
+    rawResults[slotIndex] = suggestionsForBlock(block, boolGrid, maxPerBlock, reservedCells, memory, isBoss, hints);
   });
 
   // ── Étape 2 : vérifier si au moins un bloc NON-boss a des suggestions ──────
@@ -641,7 +693,6 @@ export function generateSuggestions(
     if (!block) { result[slotIndex] = []; return; }
     const isBoss = slotIndex === bossSlot;
     if (isBoss && nonBossHasPlacements) {
-      // Des alternatives existent → on cache les suggestions du boss
       result[slotIndex] = [];
     } else {
       result[slotIndex] = rawResults[slotIndex];
