@@ -214,6 +214,7 @@ const HandSlot: React.FC<HandSlotProps> = ({
                   title={color}
                 />
               ))}
+              
             </div>
             <ScrollArea className="flex-1 min-h-0">
               <div className="space-y-4 pr-2">
@@ -334,6 +335,7 @@ export const HandSelector: React.FC<HandSelectorProps> = ({
             isKeyboardSelected={keyboardSelectedSlot === slot}
           />
         ))}
+        
       </div>
       {keyboardSelectedSlot !== null && keyboardSelectedSlot !== undefined && (
         <div className="text-xs text-primary text-center animate-suggestion-in">
