@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import { Eraser, Trash2, Grid, Lightbulb } from 'lucide-react';
+import { Eraser, Trash2, Grid, Lightbulb, Brain } from 'lucide-react';
 
 interface GridToolbarProps {
   selectedColor: string;
@@ -16,6 +16,8 @@ interface GridToolbarProps {
   occupiedCount: number;
   onAnalyze: () => void;
   isAnalyzing?: boolean;
+  learningMode?: boolean;
+  learningCount?: number;
 }
 
 export const GridToolbar: React.FC<GridToolbarProps> = ({
@@ -27,6 +29,8 @@ export const GridToolbar: React.FC<GridToolbarProps> = ({
   occupiedCount,
   onAnalyze,
   isAnalyzing,
+  learningMode,
+  learningCount,
 }) => {
   const { theme } = useTheme();
 
@@ -123,15 +127,23 @@ export const GridToolbar: React.FC<GridToolbarProps> = ({
           </TooltipContent>
         </Tooltip>
 
+        {/* Mode apprentissage */}
+        {learningMode && (
+          <Badge variant="outline" className="text-[10px] flex items-center gap-1 h-6 text-purple-500 border-purple-400/40 bg-purple-500/5">
+            <Brain className="h-3 w-3" />
+            Apprentissage {learningCount !== undefined ? `(${learningCount})` : ''}
+          </Badge>
+        )}
+
         {/* Analyser */}
         <Button
           size="sm"
           onClick={onAnalyze}
-          disabled={isAnalyzing}
+          disabled={isAnalyzing || learningMode}
           className="flex items-center gap-1.5"
         >
           <Lightbulb className="h-3.5 w-3.5" />
-          {isAnalyzing ? 'Analyse...' : 'Analyser'}
+          {isAnalyzing ? 'Analyse...' : learningMode ? 'Analyse désactivée' : 'Analyser'}
         </Button>
       </div>
     </TooltipProvider>

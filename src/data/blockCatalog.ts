@@ -207,12 +207,12 @@ export const BLOCK_CATALOG: BlockDefinition[] = [
     series: "L",
     size: 6,
     shape: [
-      [0, 0],
-      [1, 0],
-      [2, 0],
+      [0, 1],
+      [1, 1],
       [2, 1],
-      [2, 2],
-      [2, 3],
+      [3, 1],
+      [4, 1],
+      [4, 2],
     ],
   },
   {

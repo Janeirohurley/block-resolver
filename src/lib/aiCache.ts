@@ -80,6 +80,9 @@ export const nextBlocksCache = new LRUCache<unknown>();
 /** Cache pour canBlockBePlaced (résultats par bloc+grille) */
 export const placabilityCache = new LRUCache<boolean>();
 
+/** Cache pour suggestOneBlock (shuffle) */
+export const oneBlockCache = new LRUCache<unknown>();
+
 // ─── Fonctions d'empreinte ────────────────────────────────────────────────────
 
 /**
@@ -127,21 +130,24 @@ export function clearAllCaches(): void {
   suggestionsCache.clear();
   nextBlocksCache.clear();
   placabilityCache.clear();
+  oneBlockCache.clear();
 }
 
-export function getAllCacheStats(): { boss: CacheStats; suggestions: CacheStats; nextBlocks: CacheStats; placability: CacheStats; combined: CacheStats } {
+export function getAllCacheStats(): { boss: CacheStats; suggestions: CacheStats; nextBlocks: CacheStats; placability: CacheStats; oneBlock: CacheStats; combined: CacheStats } {
   const b = bossCache.getStats();
   const s = suggestionsCache.getStats();
   const n = nextBlocksCache.getStats();
   const p = placabilityCache.getStats();
-  const totalHits = b.hits + s.hits + n.hits + p.hits;
-  const totalMisses = b.misses + s.misses + n.misses + p.misses;
-  const totalEntries = b.entries + s.entries + n.entries + p.entries;
+  const o = oneBlockCache.getStats();
+  const totalHits = b.hits + s.hits + n.hits + p.hits + o.hits;
+  const totalMisses = b.misses + s.misses + n.misses + p.misses + o.misses;
+  const totalEntries = b.entries + s.entries + n.entries + p.entries + o.entries;
   return {
     boss: b,
     suggestions: s,
     nextBlocks: n,
     placability: p,
+    oneBlock: o,
     combined: {
       hits: totalHits,
       misses: totalMisses,

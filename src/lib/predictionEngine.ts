@@ -16,6 +16,7 @@ import {
   suggestionsCache,
   nextBlocksCache,
   placabilityCache,
+  oneBlockCache,
   gridFingerprint,
   blockFingerprint,
   handGridKey,
@@ -41,6 +42,9 @@ const CATALOG_SAMPLE_SIZE = 18;
 
 // Pénalité forte si un bloc NON-boss empiète sur la zone réservée du boss
 const RESERVED_ZONE_PENALTY = 180;
+
+// Pénalité si un placement non-boss bloque TOUS les emplacements possibles du boss
+const BOSS_BLOCKED_PENALTY = 500;
 
 // Bonus mémoire : si un placement complète une ligne/col déjà active (historique récent)
 const MEMORY_BONUS = 25;
@@ -333,6 +337,22 @@ interface CandidateScore {
  * - De la mémoire contextuelle (bonus si continuité stratégique)
  * - Des notes d'apprentissage utilisateur (hints)
  */
+/**
+ * Vérifie si un bloc peut être placé sur une grille booléenne (n'importe où).
+ */
+function canPlaceOnBoolGrid(grid: boolean[][], block: BlockInstance): boolean {
+  const transforms = getUniqueTransforms(block.definition, block.color);
+  for (const t of transforms) {
+    const s = getInstanceShape(t);
+    for (let r = 0; r < GRID_SIZE; r++) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        if (canPlace(grid, s, r, c)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 function scoreCandidate(
   grid: boolean[][],
   shape: number[][],
@@ -342,7 +362,9 @@ function scoreCandidate(
   reservedCells: Set<string> = new Set(),
   memory: ClearMemory[] = [],
   isBossBlock = false,
-  hints: UserHints = DEFAULT_HINTS
+  hints: UserHints = DEFAULT_HINTS,
+  skipFuturePotential = false,
+  bossBlock?: BlockInstance,
 ): CandidateScore {
   const { clearedLines, clearedCols } = getClears(grid, shape, row, col);
   const { grid: gridAfter, linesCleared, colsCleared } =
@@ -364,8 +386,10 @@ function scoreCandidate(
   const densityPenalty = density > 0.6 ? (density - 0.6) * 30 : 0;
   const setupScore_ = ss - holes * HOLE_PENALTY - (regions - 1) * FRAGMENTATION_PENALTY - densityPenalty;
 
-  // ③ Potentiel futur via catalogue
-  const { expectedValue: futureScore, bestFutureClears } = futurePotential(gridAfter, color);
+  // ③ Potentiel futur via catalogue (optionnel — cher, sauté pour le boss)
+  const { expectedValue: futureScore, bestFutureClears } = skipFuturePotential
+    ? { expectedValue: 0, bestFutureClears: 0 }
+    : futurePotential(gridAfter, color);
 
   // ④ Pénalité zone réservée boss (uniquement pour les blocs NON-boss)
   let reservedPenalty = 0;
@@ -439,13 +463,20 @@ function scoreCandidate(
     }
   }
 
+  // ❼ Pénalité si le placement bloque TOUS les emplacements du boss
+  let bossBlockedPenalty = 0;
+  if (!isBossBlock && bossBlock && !canPlaceOnBoolGrid(gridAfter, bossBlock)) {
+    bossBlockedPenalty = BOSS_BLOCKED_PENALTY;
+  }
+
   const totalScore =
     immediateScore * 1.0
     + setupScore_ * 2.5
     + futureScore * FUTURE_WEIGHT
     - reservedPenalty
     + memoryBonus
-    + hintsBonus;
+    + hintsBonus
+    - bossBlockedPenalty;
 
   return {
     immediateScore,
@@ -470,7 +501,8 @@ function suggestionsForBlock(
   reservedCells: Set<string> = new Set(),
   memory: ClearMemory[] = [],
   isBossBlock = false,
-  hints: UserHints = DEFAULT_HINTS
+  hints: UserHints = DEFAULT_HINTS,
+  bossBlock?: BlockInstance,
 ): Suggestion[] {
   const candidates: Suggestion[] = [];
   const transforms = getUniqueTransforms(block.definition, block.color);
@@ -482,7 +514,7 @@ function suggestionsForBlock(
       for (let col = 0; col < GRID_SIZE; col++) {
         if (!canPlace(grid, shape, row, col)) continue;
 
-        const s = scoreCandidate(grid, shape, row, col, block.color, reservedCells, memory, isBossBlock, hints);
+        const s = scoreCandidate(grid, shape, row, col, block.color, reservedCells, memory, isBossBlock, hints, false, bossBlock);
 
         // Étiquette lisible du potentiel combo futur
         let comboLabel: string | undefined;
@@ -533,42 +565,12 @@ function suggestionsForBlock(
  * Si aucun bloc n'est plaçable, retourne le slot du plus grand bloc (par défaut : 1).
  * Cela évite de couronner Boss un bloc qui n'a aucune place sur la grille.
  */
-export function findBossSlot(hand: Array<BlockInstance | null>, grid?: Grid): number {
-  const boolGrid = grid ? gridToBool(grid) : null;
-
-  // Filtrer les blocs plaçables si on a la grille
-  let candidates = hand.map((block, idx) => ({ block, idx })).filter(x => x.block !== null);
-
-  if (boolGrid) {
-    const placeable = candidates.filter(({ block }) => {
-      if (!block) return false;
-      const transforms = getUniqueTransforms(block.definition, block.color);
-      for (const t of transforms) {
-        const shape = getInstanceShape(t);
-        for (let r = 0; r < GRID_SIZE; r++) {
-          for (let c = 0; c < GRID_SIZE; c++) {
-            if (canPlace(boolGrid, shape, r, c)) return true;
-          }
-        }
-      }
-      return false;
-    });
-    // N'utiliser que les blocs plaçables pour choisir le boss
-    if (placeable.length > 0) candidates = placeable;
-  }
-
-  if (candidates.length === 0) return 1; // main vide → défaut milieu
-
-  // Parmi les candidats plaçables, choisir le plus grand
-  let maxSize = -1;
-  let bossIdx = 1;
-  for (const { block, idx } of candidates) {
-    if (block && block.definition.size > maxSize) {
-      maxSize = block.definition.size;
-      bossIdx = idx;
-    }
-  }
-  return bossIdx;
+/**
+ * Le boss est toujours le slot du milieu (index 1).
+ * Plus besoin de calcul — le joueur décide quel bloc est le boss.
+ */
+export function findBossSlot(_hand: Array<BlockInstance | null>, _grid?: Grid): number {
+  return 1;
 }
 
 /**
@@ -577,11 +579,15 @@ export function findBossSlot(hand: Array<BlockInstance | null>, grid?: Grid): nu
  * Retourne null si aucune position valide n'existe.
  * Résultat mis en cache par empreinte grille + bloc boss.
  */
+/** Bonus de stabilité pour garder le boss au même endroit si encore valide */
+const BOSS_STABILITY_BONUS = 300;
+
 export function computeBossReservation(
   grid: Grid,
   bossBlock: BlockInstance,
   bossSlot: number,
-  memory: ClearMemory[] = []
+  memory: ClearMemory[] = [],
+  previousReservation?: BossReservation | null
 ): BossReservation | null {
   const boolGrid = gridToBool(grid);
 
@@ -599,15 +605,29 @@ export function computeBossReservation(
   let bestScore = -Infinity;
   let bestResult: BossReservation | null = null;
 
+  // Pré-calculer les cellules de l'ancienne réservation pour la stabilité
+  const prevCells = previousReservation
+    ? new Set(previousReservation.cells.map(([r, c]) => `${r},${c}`))
+    : null;
+
   for (const transform of transforms) {
     const shape = getInstanceShape(transform);
     for (let row = 0; row < GRID_SIZE; row++) {
       for (let col = 0; col < GRID_SIZE; col++) {
         if (!canPlace(boolGrid, shape, row, col)) continue;
         // Pour le boss, on évalue sans pénalité de zone réservée (c'est lui le boss!)
-        const s = scoreCandidate(boolGrid, shape, row, col, bossBlock.color, new Set(), memory, true);
-        if (s.totalScore > bestScore) {
-          bestScore = s.totalScore;
+        const s = scoreCandidate(boolGrid, shape, row, col, bossBlock.color, new Set(), memory, true, DEFAULT_HINTS, true);
+
+        // Bonus de stabilité : si ce placement correspond à l'ancienne réservation, on le favorise
+        let stabilityBonus = 0;
+        if (prevCells && row === previousReservation!.row && col === previousReservation!.col) {
+          const cellsMatch = shape.every(([dr, dc]) => prevCells.has(`${row + dr},${col + dc}`));
+          if (cellsMatch) stabilityBonus = BOSS_STABILITY_BONUS;
+        }
+
+        const adjustedScore = s.totalScore + stabilityBonus;
+        if (adjustedScore > bestScore) {
+          bestScore = adjustedScore;
           bestResult = {
             cells: shape.map(([dr, dc]) => [row + dr, col + dc] as [number, number]),
             row,
@@ -630,6 +650,11 @@ export function computeBossReservation(
 export function reservationToCellSet(reservation: BossReservation | null): Set<string> {
   if (!reservation) return new Set();
   return new Set(reservation.cells.map(([r, c]) => `${r},${c}`));
+}
+
+function reservationFingerprint(reservation: BossReservation | null): string {
+  if (!reservation) return '0';
+  return `${reservation.bossSlot}:${reservation.row}:${reservation.col}:${reservation.cells.map(([r, c]) => `${r},${c}`).join(';')}`;
 }
 
 // ─── API publique ────────────────────────────────────────────────────────────
@@ -675,11 +700,12 @@ export function generateSuggestions(
   const bossSlot = bossReservation?.bossSlot ?? findBossSlot(hand, grid);
 
   // ── Étape 1 : calculer les suggestions pour tous les blocs ─────────────────
+  const bossBlock = hand[bossSlot] ?? undefined;
   const rawResults: Record<number, Suggestion[]> = {};
   hand.forEach((block, slotIndex) => {
     if (!block) { rawResults[slotIndex] = []; return; }
     const isBoss = slotIndex === bossSlot;
-    rawResults[slotIndex] = suggestionsForBlock(block, boolGrid, maxPerBlock, reservedCells, memory, isBoss, hints);
+    rawResults[slotIndex] = suggestionsForBlock(block, boolGrid, maxPerBlock, reservedCells, memory, isBoss, hints, bossBlock);
   });
 
   // ── Étape 2 : vérifier si au moins un bloc NON-boss a des suggestions ──────
@@ -829,13 +855,25 @@ export function suggestOneBlock(
   colors: string[],
   excludeIds: string[] = [],
   bossReservation: BossReservation | null = null,
-  memory: ClearMemory[] = []
+  memory: ClearMemory[] = [],
+  excludeSeries: string[] = []
 ): BlockInstance | null {
   const boolGrid = gridToBool(grid);
+  const fp = gridFingerprint(boolGrid);
+  const colorKey = colors.join(',');
+  const excludeKey = [...excludeIds].sort().join(',');
+  const seriesKey = [...excludeSeries].sort().join(',');
+  const bfp = reservationFingerprint(bossReservation);
+  const mfp = memoryFingerprint(memory);
+  const cacheKey = `oneBlock:${fp}|${colorKey}|${excludeKey}|${seriesKey}|${bfp}|${mfp}`;
+
+  const cached = oneBlockCache.get(cacheKey);
+  if (cached !== undefined) return cached as BlockInstance | null;
+
   const reservedCells = reservationToCellSet(bossReservation);
 
   const scored = BLOCK_CATALOG
-    .filter(def => !excludeIds.includes(def.id))
+    .filter(def => !excludeIds.includes(def.id) && !excludeSeries.includes(def.series))
     .map((def, idx) => {
       const color = colors[idx % colors.length] || colors[0];
       const transforms = getUniqueTransforms(def, color);
@@ -858,8 +896,13 @@ export function suggestOneBlock(
     .filter((x): x is { def: typeof BLOCK_CATALOG[0]; color: string; score: number } => x !== null);
 
   scored.sort((a, b) => b.score - a.score);
-  if (scored.length === 0) return null;
+  if (scored.length === 0) {
+    oneBlockCache.set(cacheKey, null);
+    return null;
+  }
 
   const pick = scored[0];
-  return { definition: pick.def, rotation: 0, flipped: false, color: pick.color };
+  const result: BlockInstance = { definition: pick.def, rotation: 0, flipped: false, color: pick.color };
+  oneBlockCache.set(cacheKey, result);
+  return result;
 }

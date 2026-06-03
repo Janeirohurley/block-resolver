@@ -213,9 +213,9 @@ export const GameGrid: React.FC<GameGridProps> = ({
         if (inPreview) {
           const color = dragState!.block.color;
           if (activeDragPreview.valid) {
-            return { backgroundColor: color + 'aa', border: `2px dashed ${color}`, boxShadow: `0 0 6px ${color}66` };
+            return { backgroundColor: color + 'cc', border: `2px dashed ${color}`, boxShadow: `0 0 8px ${color}88` };
           } else {
-            return { backgroundColor: '#ef444455', border: '2px dashed #ef4444', boxShadow: '0 0 6px #ef444444' };
+            return { backgroundColor: '#ef444477', border: '2px dashed #ef4444', boxShadow: '0 0 8px #ef444466' };
           }
         }
       }
@@ -225,9 +225,9 @@ export const GameGrid: React.FC<GameGridProps> = ({
         if (inKb) {
           const color = keyboardBlock!.color;
           if (activeKbPreview.valid) {
-            return { backgroundColor: color + 'aa', border: `2px dashed ${color}`, boxShadow: `0 0 6px ${color}66` };
+            return { backgroundColor: color + 'cc', border: `2px dashed ${color}`, boxShadow: `0 0 8px ${color}88` };
           } else {
-            return { backgroundColor: '#ef444455', border: '2px dashed #ef4444' };
+            return { backgroundColor: '#ef444477', border: '2px dashed #ef4444' };
           }
         }
         if (row === kbCursor[0] && col === kbCursor[1]) {
@@ -286,10 +286,13 @@ export const GameGrid: React.FC<GameGridProps> = ({
             ref={gridRef}
             className={cn(
               'grid-bg rounded-md border p-1.5 shadow-md transition-all duration-150',
-              isDragOver && dragState ? 'border-primary shadow-lg' : 'border-border',
+              isDragOver && dragState && 'border-transparent',
               keyboardBlock && 'border-primary/60'
             )}
-            style={{ display: 'inline-block' }}
+            style={{
+              display: 'inline-block',
+              ...(isDragOver && dragState ? { boxShadow: `0 0 20px ${dragState.block.color}66, 0 0 60px ${dragState.block.color}33` } : {}),
+            }}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}

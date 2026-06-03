@@ -175,10 +175,12 @@ export function gridToBool(grid: { occupied: boolean; color: string | null }[][]
  */
 export interface PlacementResult {
   newGrid: Grid;
-  clearedLines: number[];   // indices de lignes effacées
-  clearedCols: number[];    // indices de colonnes effacées
+  clearedLines: number[];   // indices des lignes effacées
+  clearedCols: number[];    // indices des colonnes effacées
   scoreGained: number;      // points gagnés
   cellsFreed: number;       // cases libérées
+  clearType: 'good' | 'amazing';  // type de clear
+  comboLabel: string;       // "Good", "Amazing! Combo XX"
 }
 
 /**
@@ -220,12 +222,42 @@ export function applyPlacementWithClears(
     }
   }
 
-  // 4. Calculer le score
-  // Base: 10 pts × nb cases libérées, bonus ×2 si plusieurs lignes/cols en même coup
-  const cellsFreed = clearedLines.length * GRID_SIZE + clearedCols.length * GRID_SIZE;
-  const combos = clearedLines.length + clearedCols.length;
-  const bonus = combos > 1 ? combos * 10 : 0;
-  const scoreGained = cellsFreed * 10 + bonus;
+  // 4. Big combo = les deux types en même coup → clear total de la grille
+  const hasBoth = clearedLines.length > 0 && clearedCols.length > 0;
+  if (hasBoth) {
+    for (let r = 0; r < GRID_SIZE; r++) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        next[r][c] = { occupied: false, color: null };
+      }
+    }
+  }
 
-  return { newGrid: next, clearedLines, clearedCols, scoreGained, cellsFreed };
+  // 5. Calculer le score
+  const total = clearedLines.length + clearedCols.length;
+  const cellsFreed = hasBoth ? GRID_SIZE * GRID_SIZE : clearedLines.length * GRID_SIZE + clearedCols.length * GRID_SIZE;
+
+  let scoreGained: number;
+  let clearType: 'good' | 'amazing';
+  let comboLabel: string;
+
+  if (hasBoth) {
+    const comboNum = total * GRID_SIZE + clearedLines.length * clearedCols.length;
+    scoreGained = cellsFreed * Math.pow(2, clearedCols.length) * Math.pow(2, total);
+    clearType = 'amazing';
+    comboLabel = `Amazing! Combo ${comboNum}`;
+  } else if (total >= 4) {
+    scoreGained = total * 8 * 2;
+    clearType = 'good';
+    comboLabel = 'Good';
+  } else if (total >= 3) {
+    scoreGained = total * 8;
+    clearType = 'good';
+    comboLabel = 'Good';
+  } else {
+    scoreGained = total;
+    clearType = 'good';
+    comboLabel = 'Good';
+  }
+
+  return { newGrid: next, clearedLines, clearedCols, scoreGained, cellsFreed, clearType, comboLabel };
 }

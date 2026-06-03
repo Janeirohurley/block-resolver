@@ -2,9 +2,8 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { Grid, BlockInstance, Suggestion, CellState } from '@/types/types';
 import {
-  generateSuggestions,
-  suggestNextBlocks,
   suggestOneBlock,
+  suggestNextBlocks,
   findBossSlot,
   computeBossReservation,
   reservationToCellSet,
@@ -16,6 +15,7 @@ import { parseNotesToHints } from '@/lib/aiNotes';
 import { useAiNotes } from '@/hooks/useAiNotes';
 import { useGamePersistence, loadGameState, hydrateState, clearGameState } from '@/hooks/useGamePersistence';
 import { getInstanceShape, gridToBool, canPlace, applyPlacementWithClears } from '@/lib/blockUtils';
+import { gridFingerprint } from '@/lib/aiCache';
 import { DragProvider } from '@/contexts/DragContext';
 import { GameGrid } from '@/components/game/GameGrid';
 import { HandSelector } from '@/components/game/HandSelector';
@@ -28,7 +28,13 @@ import { useActivityLog } from '@/hooks/useActivityLog';
 import { ThemeProvider, useTheme } from '@/contexts/ThemeContext';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { LayoutGrid, Info, Puzzle, Sparkles, Hand, Trophy, Zap, ChevronDown, ChevronUp, ShieldAlert, BookOpen, Save } from 'lucide-react';
+import {
+  LayoutGrid, Info, Puzzle, Sparkles, Hand, Trophy, Zap,
+  ChevronDown, ChevronUp, ShieldAlert, BookOpen, Save,
+  Crown, Brain, RefreshCw, Star, PartyPopper, Shuffle,
+  Lightbulb, Gamepad2, Swords, ScrollText, GripVertical,
+  Search, RotateCcw, Trash2, AlertTriangle, Download, Upload,
+} from 'lucide-react';
 
 const GRID_SIZE = 8;
 const MAX_MEMORY = 5;
@@ -65,6 +71,9 @@ const BlockPuzzleAssistant: React.FC = () => {
   const [hasAnalyzed, setHasAnalyzed] = useState(false);
   const [kbSlot, setKbSlot] = useState<number | null>(null);
   const [showActivityLog, setShowActivityLog] = useState(true);
+  const [learningMode, setLearningMode] = useState(false);
+  const learningModeRef = useRef(false);
+  const [demoCount, setDemoCount] = useState(0);
 
   // ── Score & animation ────────────────────────────────────────────────────
   const [score, setScore] = useState(() => hydrated?.score ?? 0);
@@ -79,6 +88,75 @@ const BlockPuzzleAssistant: React.FC = () => {
   const [bossReservation, setBossReservation] = useState<BossReservation | null>(() => hydrated?.bossReservation ?? null);
   const [clearMemory, setClearMemory] = useState<ClearMemory[]>(() => hydrated?.clearMemory ?? []);
   const turnCountRef = useRef(hydrated?.turnCount ?? 0);
+  const prevBossReservationRef = useRef<BossReservation | null>(hydrated?.bossReservation ?? null);
+
+  const workerRef = useRef<Worker | null>(null);
+  const analyzeReqIdRef = useRef(0);
+  const isAnalyzingRef = useRef(false);
+
+  // Sync learningMode ref
+  useEffect(() => { learningModeRef.current = learningMode; }, [learningMode]);
+
+  // ── MCTS Worker (thread séparé pour ne pas bloquer l'UI) ────────────────
+  useEffect(() => {
+    workerRef.current = new Worker(
+      new URL('../lib/mcts.worker.ts', import.meta.url),
+      { type: 'module' }
+    );
+    return () => {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+    };
+  }, []);
+
+  // ── Worker Apprentissage par Démonstration ───────────────────────────────
+  const demonWorkerRef = useRef<Worker | null>(null);
+  const pendingExportRef = useRef(false);
+  useEffect(() => {
+    const w = new Worker(
+      new URL('../lib/rl.worker.ts', import.meta.url),
+      { type: 'module' }
+    );
+    w.onmessage = (e) => {
+      const msg = e.data;
+      if (msg.type === 'recorded') {
+        setDemoCount(msg.count);
+      } else if (msg.type === 'loaded' || msg.type === 'cleared') {
+        setDemoCount(msg.count ?? 0);
+      } else if (msg.type === 'saved') {
+        setDemoCount(msg.count ?? 0);
+        if (msg.data) {
+          try { localStorage.setItem('block_demos', msg.data); } catch { /* localStorage plein */ }
+          if (pendingExportRef.current) {
+            pendingExportRef.current = false;
+            const blob = new Blob([msg.data], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `block-demos-${Date.now()}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+            toast.success(`${msg.count} coups exportés`);
+          } else {
+            toast.success(`Démos sauvegardées (${msg.count} coups)`);
+          }
+        }
+      } else if (msg.type === 'count') {
+        setDemoCount(msg.count);
+      }
+    };
+    // Charger les démos existantes
+    try {
+      const saved = localStorage.getItem('block_demos');
+      if (saved) {
+        w.postMessage({ type: 'load', data: saved }, undefined as any);
+      } else {
+        setDemoCount(0);
+      }
+    } catch { setDemoCount(0); }
+    demonWorkerRef.current = w;
+    return () => { w.terminate(); demonWorkerRef.current = null; };
+  }, []);
 
   // ── Cache stats ──────────────────────────────────────────────────────────
   const [cacheStats, setCacheStats] = useState<CacheStats>({ hits: 0, misses: 0, entries: 0, hitRate: 0 });
@@ -116,12 +194,14 @@ const BlockPuzzleAssistant: React.FC = () => {
 
       if (!bossBlock) {
         setBossReservation(null);
+        prevBossReservationRef.current = null;
         finishActivity(actId, 'done', 'Main vide — pas de boss');
         refreshCacheStats();
         return;
       }
 
-      const reservation = computeBossReservation(currentGrid, bossBlock, newBossSlot, currentMemory);
+      const reservation = computeBossReservation(currentGrid, bossBlock, newBossSlot, currentMemory, prevBossReservationRef.current);
+      prevBossReservationRef.current = reservation;
       setBossReservation(reservation);
 
       const ms = Date.now() - t0;
@@ -220,8 +300,18 @@ const BlockPuzzleAssistant: React.FC = () => {
       startActivity, finishActivity, refreshCacheStats]
   );
 
-  // ── Analyse ──────────────────────────────────────────────────────────────
+  // ── Analyse (via Web Worker MCTS) ────────────────────────────────────────
   const handleAnalyze = useCallback(() => {
+    if (learningModeRef.current) {
+      toast.info('Mode apprentissage actif', {
+        description: 'Désactivez le mode apprentissage pour utiliser les suggestions.',
+      });
+      return;
+    }
+    if (isAnalyzingRef.current) {
+      toast.info('Analyse déjà en cours…');
+      return;
+    }
     const hasBlocks = hand.some(Boolean);
     if (!hasBlocks) {
       toast.info('Ajoutez au moins un bloc dans votre main', {
@@ -229,26 +319,47 @@ const BlockPuzzleAssistant: React.FC = () => {
       });
       return;
     }
+    const worker = workerRef.current;
+    if (!worker) {
+      toast.error('Worker MCTS non disponible');
+      return;
+    }
+
+    analyzeReqIdRef.current += 1;
+    const reqId = analyzeReqIdRef.current;
+    isAnalyzingRef.current = true;
     setIsAnalyzing(true);
     const actId = startActivity('Analyse IA', `${hand.filter(Boolean).length} bloc(s) à évaluer…`);
     const t0 = Date.now();
-    setTimeout(() => {
-      try {
-        const hints = parseNotesToHints(notes);
-        const result = generateSuggestions(grid, hand, 3, bossReservation, clearMemory, hints);
-        setSuggestions(result);
+
+    worker.onmessage = (e: MessageEvent) => {
+      if (reqId !== analyzeReqIdRef.current) return;
+      worker.onmessage = null;
+      worker.onerror = null;
+      const msg = e.data;
+      if (msg.type === 'error') {
+        finishActivity(actId, 'error', 'Erreur Worker');
+        toast.error("Erreur lors de l'analyse");
+        isAnalyzingRef.current = false;
+        setIsAnalyzing(false);
+        return;
+      }
+      const result = msg.suggestions as Record<number, Suggestion[]>;
+      const totalSims = msg.totalSims as number;
+
+      // Query demos pour booster les suggestions similaires
+      const doSetSuggestions = (suggestions: Record<number, Suggestion[]>) => {
+        setSuggestions(suggestions);
         setHasAnalyzed(true);
-        const total = Object.values(result).flat().length;
-        const ms = Date.now() - t0;
-        const fromCache = ms < 5;
-        // Vérifier si le boss est en dernier recours
-        const bossSlotLocal = bossReservation?.bossSlot ?? findBossSlot(hand, grid);
-        const nonBossTotal = Object.entries(result)
+        const total = Object.values(suggestions).flat().length;
+        const bossSlotLocal = bossReservation?.bossSlot ?? 1;
+        const nonBossTotal = Object.entries(suggestions)
           .filter(([idx]) => parseInt(idx) !== bossSlotLocal)
           .reduce((acc, [, arr]) => acc + arr.length, 0);
-        const isLastResort = nonBossTotal === 0 && (result[bossSlotLocal]?.length ?? 0) > 0;
-        finishActivity(actId, fromCache ? 'cached' : 'done',
-          `${total} suggestion${total > 1 ? 's' : ''} ${isLastResort ? '⚠ Boss dernier recours' : ''} ${activeNotesCount > 0 ? `📝×${activeNotesCount}` : ''} ${fromCache ? '(cache)' : `en ${ms} ms`}`.trim());
+        const isLastResort = nonBossTotal === 0 && (suggestions[bossSlotLocal]?.length ?? 0) > 0;
+        const ms = Date.now() - t0;
+        finishActivity(actId, 'done',
+          `${total} sugg. · ${totalSims} sims MCTS ${isLastResort ? '⚠ Boss dernier recours' : ''} ${activeNotesCount > 0 ? `📝×${activeNotesCount}` : ''} en ${ms} ms`.trim());
         refreshCacheStats();
         if (total === 0) {
           toast.warning('Aucun placement possible', { description: 'La grille est trop remplie.' });
@@ -258,18 +369,80 @@ const BlockPuzzleAssistant: React.FC = () => {
             duration: 3500,
           });
         } else {
-          toast.success(`${total} suggestion${total > 1 ? 's' : ''} trouvée${total > 1 ? 's' : ''}`, {
-            description: fromCache ? '⚡ Résultat instantané (cache IA)' : 'Survolez une carte pour prévisualiser.',
+          toast.success(`${total} suggestion${total > 1 ? 's' : ''} · ${totalSims} simulations MCTS`, {
+            description: '🔮 L\'IA a exploré des centaines de parties futures.',
           });
         }
-      } catch {
-        finishActivity(actId, 'error', 'Erreur inattendue');
-        toast.error("Erreur lors de l'analyse");
-      } finally {
+        isAnalyzingRef.current = false;
         setIsAnalyzing(false);
+      };
+
+      if (demoCount > 0) {
+        const origHandler = demonWorkerRef.current?.onmessage;
+        const handler = (ev: MessageEvent) => {
+          const dmsg = ev.data;
+          if (dmsg.type === 'similar') {
+            demonWorkerRef.current!.onmessage = origHandler ?? null;
+            if (dmsg.results?.length > 0) {
+              const boosted: Record<number, Suggestion[]> = {};
+              for (const [slotKey, suggestions] of Object.entries(result)) {
+                boosted[slotKey] = suggestions.map(s => {
+                  const match = (dmsg.results as any[]).find((r: any) =>
+                    r.move.blockId === s.blockInstance.definition.id &&
+                    r.move.rotation === s.blockInstance.rotation &&
+                    r.move.flipped === s.blockInstance.flipped &&
+                    r.move.row === s.position.row &&
+                    r.move.col === s.position.col
+                  );
+                  if (match) {
+                    const boost = 1 + match.similarity * 0.5;
+                    return { ...s, score: Math.round(s.score * boost), comboLabel: `👤 ${Math.round(match.similarity * 100)}% · ` + s.comboLabel };
+                  }
+                  return s;
+                }).sort((a, b) => b.score - a.score);
+              }
+              doSetSuggestions(boosted);
+            } else {
+              doSetSuggestions(result);
+            }
+          } else if (dmsg.type === 'recorded') {
+            setDemoCount(dmsg.count);
+          }
+        };
+        demonWorkerRef.current!.onmessage = handler;
+        demonWorkerRef.current?.postMessage({
+          type: 'findSimilar',
+          grid,
+          hand,
+          topN: 10,
+        }, undefined as any);
+      } else {
+        doSetSuggestions(result);
       }
-    }, 50);
-  }, [grid, hand, bossReservation, clearMemory, notes, activeNotesCount, startActivity, finishActivity, refreshCacheStats]);
+    };
+
+    worker.onerror = () => {
+      if (reqId !== analyzeReqIdRef.current) return;
+      worker.onmessage = null;
+      worker.onerror = null;
+      finishActivity(actId, 'error', 'Erreur Worker');
+      toast.error("Erreur lors de l'analyse");
+      isAnalyzingRef.current = false;
+      setIsAnalyzing(false);
+    };
+
+    const hints = parseNotesToHints(notes);
+    const reservedCells = bossReservation?.cells.map(([r, c]) => `${r},${c}`) ?? undefined;
+    worker.postMessage({
+      type: 'analyze',
+      grid,
+      hand,
+      hints,
+      config: { iterations: 400, timeBudget: 3000 },
+      reservedCells,
+      bossSlot: bossReservation?.bossSlot,
+    });
+  }, [grid, hand, bossReservation, notes, activeNotesCount, startActivity, finishActivity, refreshCacheStats]);
 
   // ── Effacer la grille ────────────────────────────────────────────────────
   const handleClearGrid = useCallback(() => {
@@ -282,6 +455,7 @@ const BlockPuzzleAssistant: React.FC = () => {
     setExplodingCells(new Set());
     setScorePopup(null);
     setBossReservation(null);
+    prevBossReservationRef.current = null;
     setClearMemory([]);
     turnCountRef.current = 0;
     clearAllCaches();
@@ -298,6 +472,21 @@ const BlockPuzzleAssistant: React.FC = () => {
     const entry = Object.entries(suggestions).find(([, arr]) => arr.some(sg => sg.id === s.id));
     setHighlightedSlot(entry ? parseInt(entry[0]) : null);
   }, [suggestions]);
+
+  // ── S'assurer que le boss (slot 1) est le plus grand ────────────────────
+  // ── Recharger un slot individuel en mode apprentissage ──────────────────
+  const refillLearningSlot = useCallback(
+    (slotIndex: number, currentHand: Array<BlockInstance | null>, currentGrid: Grid): BlockInstance | null => {
+      const currentBlocks = currentHand.filter((b): b is BlockInstance => b !== null);
+      const excludeIds = currentBlocks.map(b => b.definition.id);
+      const excludeSeries = currentBlocks.map(b => b.definition.series);
+      const color = theme.blockColors[slotIndex] || theme.blockColors[0];
+      const newBlock = suggestOneBlock(currentGrid, theme.blockColors, excludeIds, bossReservation, clearMemory, excludeSeries);
+      if (!newBlock) return null;
+      return { ...newBlock, color };
+    },
+    [theme.blockColors, bossReservation, clearMemory]
+  );
 
   // ── Recharger la main si tous les slots sont vides ──────────────────────
   const refillHandIfEmpty = useCallback(
@@ -329,19 +518,25 @@ const BlockPuzzleAssistant: React.FC = () => {
   const triggerPlacementResult = useCallback(
     (
       newGrid: Grid,
-      result: { clearedLines: number[]; clearedCols: number[]; scoreGained: number; cellsFreed: number },
+      result: { clearedLines: number[]; clearedCols: number[]; scoreGained: number; cellsFreed: number; clearType: string; comboLabel: string },
       newHand: Array<BlockInstance | null> | null,
       newMemory: ClearMemory[]
     ) => {
-      const { clearedLines, clearedCols, scoreGained, cellsFreed } = result;
+      const { clearedLines, clearedCols, scoreGained, cellsFreed, clearType, comboLabel } = result;
       const combos = clearedLines.length + clearedCols.length;
+      const isAmazing = clearType === 'amazing';
 
-      const toExplode = new Set<string>();
-      for (const r of clearedLines) {
-        for (let c = 0; c < GRID_SIZE; c++) toExplode.add(`${r},${c}`);
-      }
-      for (const col of clearedCols) {
-        for (let r = 0; r < GRID_SIZE; r++) toExplode.add(`${r},${col}`);
+      let toExplode = new Set<string>();
+      if (isAmazing) {
+        // Big combo = toute la grille explose
+        for (let r = 0; r < GRID_SIZE; r++)
+          for (let c = 0; c < GRID_SIZE; c++)
+            toExplode.add(`${r},${c}`);
+      } else {
+        for (const r of clearedLines)
+          for (let c = 0; c < GRID_SIZE; c++) toExplode.add(`${r},${c}`);
+        for (const col of clearedCols)
+          for (let r = 0; r < GRID_SIZE; r++) toExplode.add(`${r},${col}`);
       }
 
       setGrid(newGrid);
@@ -355,7 +550,7 @@ const BlockPuzzleAssistant: React.FC = () => {
           recomputeBoss(newGrid, newHand ?? [], newMemory);
           setSuggestions({});
           setHasAnalyzed(false);
-        }, 500);
+        }, isAmazing ? 1200 : 500);
       } else {
         if (newHand) setHand(newHand);
         recomputeBoss(newGrid, newHand ?? [], newMemory);
@@ -373,14 +568,16 @@ const BlockPuzzleAssistant: React.FC = () => {
         const comboMsg = combos > 1 ? ` (×${combos} combo !)` : '';
         if (combos > 0) {
           logInstant(
-            `💥 ${combos} ligne${combos > 1 ? 's' : ''} effacée${combos > 1 ? 's' : ''}${comboMsg}`,
+            isAmazing
+              ? `🔥 ${comboLabel}`
+              : `💥 ${combos} ligne${combos > 1 ? 's' : ''} effacée${combos > 1 ? 's' : ''}${comboMsg}`,
             'done',
             `+${scoreGained} pts · ${cellsFreed} cases libérées`
           );
         }
-        toast.success(`🎉 ${cellsFreed} cases libérées${comboMsg}`, {
-          description: `+${scoreGained} points`,
-          duration: 2000,
+        toast.success(isAmazing ? `🔥 ${comboLabel}` : `🎉 ${cellsFreed} cases libérées${comboMsg}`, {
+          description: `+${scoreGained.toLocaleString()} points`,
+          duration: isAmazing ? 4000 : 2000,
         });
       }
     },
@@ -417,6 +614,26 @@ const BlockPuzzleAssistant: React.FC = () => {
       'done',
       `L${suggestion.position.row + 1} C${suggestion.position.col + 1}`
     );
+    if (learningModeRef.current) {
+      const fp = gridFingerprint(gridToBool(grid));
+      const handIds = hand.map(b => b?.definition.id ?? 'null').join(',');
+      demonWorkerRef.current?.postMessage({
+        type: 'record',
+        move: {
+          gridFingerprint: fp,
+          handIds,
+          blockId: suggestion.blockInstance.definition.id,
+          rotation: suggestion.blockInstance.rotation,
+          flipped: suggestion.blockInstance.flipped,
+          row: suggestion.position.row,
+          col: suggestion.position.col,
+          linesCleared: result.clearedLines.length,
+          colsCleared: result.clearedCols.length,
+          scoreGained: result.scoreGained,
+          timestamp: Date.now(),
+        },
+      }, undefined as any);
+    }
     const slotEntry = Object.entries(suggestions).find(([, arr]) =>
       arr.some(s => s.id === suggestion.id)
     );
@@ -424,10 +641,20 @@ const BlockPuzzleAssistant: React.FC = () => {
     const updatedHand = [...hand] as Array<BlockInstance | null>;
     if (slotIndex >= 0) updatedHand[slotIndex] = null;
     const newMemory = buildNewMemory(result.clearedLines, result.clearedCols);
-    const finalHand = refillHandIfEmpty(updatedHand, result.newGrid, newMemory);
+    let finalHand: Array<BlockInstance | null>;
+    if (learningModeRef.current) {
+      const newHand = [...updatedHand];
+      const newBlock = refillLearningSlot(slotIndex, updatedHand, result.newGrid);
+      if (newBlock) newHand[slotIndex] = newBlock;
+      finalHand = newHand.every(b => b === null)
+        ? refillHandIfEmpty(newHand, result.newGrid, newMemory)
+        : newHand;
+    } else {
+      finalHand = refillHandIfEmpty(updatedHand, result.newGrid, newMemory);
+    }
     triggerPlacementResult(result.newGrid, result, finalHand, newMemory);
     setHoveredSuggestion(null);
-  }, [grid, hand, suggestions, refillHandIfEmpty, triggerPlacementResult, buildNewMemory, logInstant]);
+  }, [grid, hand, suggestions, refillHandIfEmpty, triggerPlacementResult, buildNewMemory, logInstant, refillLearningSlot]);
 
   // ── Placer un bloc (drag, clavier) ───────────────────────────────────────
   const placeBlock = useCallback(
@@ -441,14 +668,44 @@ const BlockPuzzleAssistant: React.FC = () => {
         'done',
         `L${anchorRow + 1} C${anchorCol + 1}`
       );
+      if (learningModeRef.current) {
+        const fp = gridFingerprint(boolGrid);
+        const handIds = hand.map(b => b?.definition.id ?? 'null').join(',');
+        demonWorkerRef.current?.postMessage({
+          type: 'record',
+          move: {
+            gridFingerprint: fp,
+            handIds,
+            blockId: block.definition.id,
+            rotation: block.rotation,
+            flipped: block.flipped,
+            row: anchorRow,
+            col: anchorCol,
+            linesCleared: result.clearedLines.length,
+            colsCleared: result.clearedCols.length,
+            scoreGained: result.scoreGained,
+            timestamp: Date.now(),
+          },
+        }, undefined as any);
+      }
       const updatedHand = [...hand] as Array<BlockInstance | null>;
       if (slotIndex >= 0) updatedHand[slotIndex] = null;
       const newMemory = buildNewMemory(result.clearedLines, result.clearedCols);
-      const finalHand = refillHandIfEmpty(updatedHand, result.newGrid, newMemory);
+      let finalHand: Array<BlockInstance | null>;
+      if (learningModeRef.current) {
+        const newHand = [...updatedHand];
+        const newBlock = refillLearningSlot(slotIndex, updatedHand, result.newGrid);
+        if (newBlock) newHand[slotIndex] = newBlock;
+        finalHand = newHand.every(b => b === null)
+          ? refillHandIfEmpty(newHand, result.newGrid, newMemory)
+          : newHand;
+      } else {
+        finalHand = refillHandIfEmpty(updatedHand, result.newGrid, newMemory);
+      }
       triggerPlacementResult(result.newGrid, result, finalHand, newMemory);
       return true;
     },
-    [grid, hand, refillHandIfEmpty, triggerPlacementResult, buildNewMemory, logInstant]
+    [grid, hand, refillHandIfEmpty, triggerPlacementResult, buildNewMemory, logInstant, refillLearningSlot]
   );
 
   // ── Drop depuis la Main ──────────────────────────────────────────────────
@@ -500,6 +757,8 @@ const BlockPuzzleAssistant: React.FC = () => {
   );
   const bossIsLastResort = hasAnalyzed && !nonBossHasSuggestions && (suggestions[bossSlot]?.length ?? 0) > 0;
 
+  const bentoCard = 'bg-card rounded-md border border-border shadow-sm';
+
   return (
     <div
       className="flex flex-col min-h-screen bg-background"
@@ -508,64 +767,115 @@ const BlockPuzzleAssistant: React.FC = () => {
     >
       {/* ── Header ── */}
       <header className="flex-shrink-0 border-b border-border bg-card/90 backdrop-blur-sm sticky top-0 z-10 shadow-sm">
-        <div className="max-w-screen-xl mx-auto px-4 py-2.5 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2.5 min-w-0">
+        <div className="max-w-screen-xl mx-auto px-3 md:px-4 py-2 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             <div
-              className="w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0"
+              className="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0"
               style={{
                 background: `linear-gradient(135deg, ${theme.accentColor}30, ${theme.accentColor}15)`,
                 border: `1px solid ${theme.accentColor}50`,
               }}
             >
-              <Puzzle className="h-4 w-4" style={{ color: theme.accentColor }} />
+              <Puzzle className="h-3.5 w-3.5" style={{ color: theme.accentColor }} />
             </div>
             <div className="min-w-0">
               <h1 className="text-sm font-bold text-foreground leading-tight truncate">
-                Block Puzzle — Assistant IA
+                Block Puzzle <span className="hidden sm:inline">— Assistant IA</span>
               </h1>
-              <p className="text-xs text-muted-foreground hidden sm:block">
+              <p className="text-[10px] text-muted-foreground hidden md:block">
                 Prédiction intelligente des meilleurs coups
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-1.5 flex-shrink-0">
             {clearMemory.length > 0 && (
-              <Badge variant="outline" className="text-xs hidden md:flex gap-1 font-mono"
+              <Badge variant="outline" className="text-[10px] hidden lg:flex gap-1 font-mono h-5"
                 style={{ borderColor: `${theme.accentColor}40`, color: theme.accentColor }}>
-                🧠 {clearMemory.length} coup{clearMemory.length > 1 ? 's' : ''} mémorisé{clearMemory.length > 1 ? 's' : ''}
+                <Brain className="h-3 w-3" />
+                {clearMemory.length} coup{clearMemory.length > 1 ? 's' : ''}
               </Badge>
             )}
             <div
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md border ${scoreBump ? 'animate-score-bump' : ''}`}
+              className={`flex items-center gap-1 px-2 py-0.5 rounded-md border ${scoreBump ? 'animate-score-bump' : ''}`}
               style={{ borderColor: `${theme.accentColor}50`, background: `${theme.accentColor}10` }}
             >
-              <Trophy className="h-3.5 w-3.5" style={{ color: theme.accentColor }} />
-              <span className="text-sm font-bold font-mono tabular-nums" style={{ color: theme.accentColor }}>
+              <Trophy className="h-3 w-3" style={{ color: theme.accentColor }} />
+              <span className="text-sm font-bold font-mono tabular-nums leading-tight" style={{ color: theme.accentColor }}>
                 {score.toLocaleString()}
               </span>
             </div>
-            <Badge variant="secondary" className="text-xs hidden sm:flex font-mono"
-              style={{ borderColor: `${theme.accentColor}40` }}>
-              8 × 8
-            </Badge>
             <span className="text-[10px] text-muted-foreground hidden md:flex items-center gap-1" title="Partie sauvegardée automatiquement">
               <Save className="h-3 w-3" />
-              Auto-sauvegarde
+              <span className="hidden lg:inline">Auto</span>
             </span>
+            <button
+              className="h-7 w-7 rounded-md border border-border flex items-center justify-center hover:bg-muted/50 transition-colors"
+              title="Exporter l'état complet"
+              onClick={async () => {
+                try {
+                  const out: Record<string, any> = { version: 1, exportedAt: Date.now() };
+                  for (const key of ['blockpuzzle_game_state', 'blockpuzzle_ai_notes', 'blockpuzzle-theme', 'block_demos']) {
+                    const val = localStorage.getItem(key);
+                    if (val) out[key] = JSON.parse(val);
+                  }
+                  const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url; a.download = `blockpuzzle-save-${Date.now()}.json`; a.click();
+                  URL.revokeObjectURL(url);
+                  toast.success('État exporté');
+                } catch { toast.error('Erreur export'); }
+              }}
+            >
+              <Download className="h-3.5 w-3.5" />
+            </button>
+            <button
+              className="h-7 w-7 rounded-md border border-border flex items-center justify-center hover:bg-muted/50 transition-colors"
+              title="Importer un état complet"
+              onClick={() => {
+                const input = document.createElement('input');
+                input.type = 'file'; input.accept = '.json';
+                input.onchange = async () => {
+                  const file = input.files?.[0]; if (!file) return;
+                  try {
+                    const text = await file.text();
+                    const data = JSON.parse(text);
+                    if (!data.version) { toast.error('Fichier invalide'); return; }
+                    const keys = ['blockpuzzle_game_state', 'blockpuzzle_ai_notes', 'blockpuzzle-theme', 'block_demos'];
+                    let restored = false;
+                    for (const key of keys) {
+                      if (data[key] !== undefined) {
+                        localStorage.setItem(key, JSON.stringify(data[key]));
+                        restored = true;
+                      }
+                    }
+                    if (restored) {
+                      toast.success('État importé — rechargez la page', { duration: 4000 });
+                      setTimeout(() => window.location.reload(), 1500);
+                    } else {
+                      toast.error('Aucune donnée trouvée');
+                    }
+                  } catch { toast.error('Fichier invalide'); }
+                };
+                input.click();
+              }}
+            >
+              <Upload className="h-3.5 w-3.5" />
+            </button>
             <ThemeConfigPanel />
           </div>
         </div>
       </header>
 
-      {/* ── Layout principal ── */}
-      <main className="flex-1 max-w-screen-xl mx-auto w-full px-4 py-4 min-w-0">
-        <div className="flex flex-col lg:flex-row gap-4">
+      {/* ── Bento Grid Layout ── */}
+      <main className="flex-1 max-w-screen-xl mx-auto w-full px-3 md:px-4 py-3 md:py-4 min-w-0">
+        <div className="grid grid-cols-1 xl:grid-cols-[1fr_340px] gap-3 auto-rows-min">
 
-          {/* ═══ Colonne centrale ═══ */}
-          <div className="flex-1 min-w-0 flex flex-col gap-3">
+          {/* ═══ COLONNE GAUCHE ═══ */}
+          <div className="flex flex-col gap-3 min-w-0 xl:col-start-1">
 
-            {/* Barre d'outils */}
-            <div className="bg-card rounded-md border border-border p-3 shadow-sm">
+            {/* ── Barre d'outils ── */}
+            <div className={`${bentoCard} p-2.5 md:p-3`}>
               <GridToolbar
                 selectedColor={selectedColor}
                 onColorChange={setSelectedColor}
@@ -575,27 +885,30 @@ const BlockPuzzleAssistant: React.FC = () => {
                 occupiedCount={occupiedCount}
                 onAnalyze={handleAnalyze}
                 isAnalyzing={isAnalyzing}
+                learningMode={learningMode}
+                learningCount={demoCount}
               />
             </div>
 
-            {/* Grille 8×8 */}
-            <div className="bg-card rounded-md border border-border p-4 shadow-sm">
+            {/* ── Grille 8×8 ── */}
+            <div className={`${bentoCard} p-3 md:p-4`}>
               <div className="flex items-center gap-2 mb-3">
-                <LayoutGrid className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                <span className="text-sm font-semibold text-foreground">Plateau de jeu</span>
+                <Gamepad2 className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                <span className="text-sm font-semibold text-foreground">Plateau</span>
                 {explodingCells.size > 0 && (
-                  <span className="flex items-center gap-1 text-xs font-medium ml-1"
+                  <span className="flex items-center gap-1 text-xs font-medium"
                     style={{ color: theme.accentColor }}>
-                    <Zap className="h-3.5 w-3.5" />
+                    <Zap className="h-3 w-3" />
                     Explosion !
                   </span>
                 )}
                 {bossReservation && (
-                  <span className="text-xs ml-1 hidden sm:inline" style={{ color: bossColor }}>
-                    👑 Zone Boss réservée
+                  <span className="text-[10px] hidden sm:inline-flex items-center gap-1 ml-1" style={{ color: bossColor }}>
+                    <Crown className="h-3 w-3" />
+                    Boss
                   </span>
                 )}
-                <Badge variant="outline" className="text-xs ml-auto font-mono">
+                <Badge variant="outline" className="text-[10px] ml-auto font-mono h-5">
                   {occupiedCount}/64
                 </Badge>
               </div>
@@ -619,15 +932,15 @@ const BlockPuzzleAssistant: React.FC = () => {
               </div>
             </div>
 
-            {/* ══ Main du joueur ══ */}
-            <div className="bg-card rounded-md border border-border p-4 shadow-sm">
+            {/* ── Main du joueur ── */}
+            <div className={`${bentoCard} p-3 md:p-4`}>
               <div className="flex items-center gap-2 mb-3">
                 <Hand className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                 <span className="text-sm font-semibold text-foreground">Ma main</span>
-                <span className="text-xs text-muted-foreground ml-1 hidden sm:inline">
-                  — glissez un bloc vers la grille
+                <span className="text-[10px] text-muted-foreground hidden sm:inline">
+                  — glissez vers la grille
                 </span>
-                <Badge variant="secondary" className="text-xs ml-auto">
+                <Badge variant="secondary" className="text-[10px] ml-auto h-5">
                   {hand.filter(Boolean).length}/3
                 </Badge>
               </div>
@@ -642,91 +955,109 @@ const BlockPuzzleAssistant: React.FC = () => {
               />
             </div>
 
-            {/* ── Journal d'activité IA ── */}
-            <div className="bg-card rounded-md border border-border shadow-sm overflow-hidden">
+            {/* ── Journal IA + Aide rapide ── */}
+            <div className={`${bentoCard} overflow-hidden`}>
               <button
-                className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-muted/30 transition-colors"
+                className="w-full flex items-center gap-2 px-3 md:px-4 py-2.5 hover:bg-muted/30 transition-colors"
                 onClick={() => setShowActivityLog(v => !v)}
               >
-                <Sparkles className="h-3.5 w-3.5 flex-shrink-0" style={{ color: theme.accentColor }} />
+                <Brain className="h-3.5 w-3.5 flex-shrink-0" style={{ color: theme.accentColor }} />
                 <span className="text-xs font-semibold text-foreground flex-1 text-left">
-                  Journal IA en temps réel
+                  Journal IA
                 </span>
                 {activityEntries.some(e => e.status === 'running') && (
                   <span className="text-[10px] text-blue-500 font-medium animate-pulse">calcul…</span>
                 )}
                 {cacheStats.entries > 0 && (
-                  <span className="text-[10px] font-mono text-muted-foreground hidden sm:inline">
-                    ⚡ {Math.round(cacheStats.hitRate * 100)}% cache
+                  <span className="text-[10px] font-mono text-muted-foreground hidden md:inline">
+                    <Zap className="h-2.5 w-2.5 inline mr-0.5" />
+                    {Math.round(cacheStats.hitRate * 100)}%
                   </span>
                 )}
                 {showActivityLog
-                  ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                  : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                  ? <ChevronUp className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                  : <ChevronDown className="h-3 w-3 text-muted-foreground flex-shrink-0" />
                 }
               </button>
               {showActivityLog && (
-                <div className="px-4 pb-3 border-t border-border/50">
-                  <ActivityPanel
-                    entries={activityEntries}
-                    cacheStats={cacheStats}
-                    className="pt-2"
-                  />
+                <div className="border-t border-border/50">
+                  <div className="px-3 md:px-4 pb-2 pt-2">
+                    <ActivityPanel
+                      entries={activityEntries}
+                      cacheStats={cacheStats}
+                      className=""
+                    />
+                  </div>
+                  <div className="flex items-start gap-2 px-3 md:px-4 pb-3 pt-1 text-[10px] text-muted-foreground border-t border-border/30">
+                    <Lightbulb className="h-3 w-3 mt-0.5 flex-shrink-0 text-primary/60" />
+                    <p className="text-pretty leading-snug">
+                      <strong className="text-foreground">Aide :</strong>{' '}
+                      ① <strong className="text-foreground">Glissez</strong> un bloc vers la grille.{' '}
+                      ② <Crown className="h-2.5 w-2.5 inline" />{' '}
+                      <strong className="text-yellow-600 dark:text-yellow-400">Boss</strong> = le plus grand bloc plaçable (zone réservée).{' '}
+                      ③ <Shuffle className="h-2.5 w-2.5 inline" />{' '}
+                      <strong className="text-foreground">Changer</strong> les blocs gauche/droite.{' '}
+                      ④ Touches{' '}
+                      <kbd className="px-0.5 rounded bg-muted font-mono text-[9px]">1</kbd>
+                      <kbd className="px-0.5 rounded bg-muted font-mono text-[9px]">2</kbd>
+                      <kbd className="px-0.5 rounded bg-muted font-mono text-[9px]">3</kbd> + flèches +{' '}
+                      <kbd className="px-0.5 rounded bg-muted font-mono text-[9px]">Entrée</kbd>.
+                    </p>
+                  </div>
+                </div>
+              )}
+              {!showActivityLog && (
+                <div className="flex items-start gap-2 px-3 md:px-4 pb-3 text-[10px] text-muted-foreground border-t border-border/30 pt-2">
+                  <Lightbulb className="h-3 w-3 mt-0.5 flex-shrink-0 text-primary/60" />
+                  <p className="text-pretty leading-snug">
+                    <strong className="text-foreground">Aide :</strong> Glissez un bloc → grille. <Crown className="h-2.5 w-2.5 inline" /> Boss = dernier recours. Touches{' '}
+                    <kbd className="px-0.5 rounded bg-muted font-mono text-[9px]">1</kbd>
+                    <kbd className="px-0.5 rounded bg-muted font-mono text-[9px]">2</kbd>
+                    <kbd className="px-0.5 rounded bg-muted font-mono text-[9px]">3</kbd> + flèches.
+                  </p>
                 </div>
               )}
             </div>
-
-            {/* Aide rapide */}
-            <div className="flex items-start gap-2 p-3 rounded-md border border-border bg-muted/30 text-xs text-muted-foreground">
-              <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-primary/60" />
-              <p className="text-pretty">
-                <strong className="text-foreground">Comment jouer :</strong>{' '}
-                ① <strong className="text-foreground">Glissez</strong> un bloc de «&nbsp;Ma main&nbsp;» vers la grille.{' '}
-                ② Le <strong className="text-yellow-600 dark:text-yellow-400">👑 Boss</strong> est le plus grand bloc <em>qui peut encore être placé</em> — il a une zone réservée (pointillés).{' '}
-                ③ Utilisez <strong className="text-foreground">🔀 Changer</strong> sur les blocs gauche/droite pour un remplaçant IA.{' '}
-                ④ Touche{' '}
-                <kbd className="px-1 py-0.5 rounded bg-muted font-mono text-[10px]">1</kbd>
-                <kbd className="px-1 py-0.5 rounded bg-muted font-mono text-[10px] mx-0.5">2</kbd>
-                <kbd className="px-1 py-0.5 rounded bg-muted font-mono text-[10px]">3</kbd>{' '}
-                + flèches + <kbd className="px-1 py-0.5 rounded bg-muted font-mono text-[10px]">Entrée</kbd>{' '}
-                pour le mode clavier.
-              </p>
-            </div>
           </div>
 
-          {/* ═══ Sidebar droite ═══ */}
-          <div className="lg:w-80 xl:w-96 flex-shrink-0">
+          {/* ═══ COLONNE DROITE ═══ */}
+          <div className="flex flex-col gap-3 min-w-0 xl:col-start-2 xl:row-span-1">
             <div
-              className="bg-card rounded-md border border-border shadow-sm p-4 flex flex-col lg:sticky lg:top-[60px]"
-              style={{ maxHeight: 'calc(100vh - 80px)' }}
+              className={`${bentoCard} p-3 md:p-4 flex flex-col xl:sticky xl:top-[56px]`}
+              style={{ maxHeight: 'calc(100vh - 72px)' }}
             >
+              {/* ── En-tête Suggestions ── */}
               <div className="flex items-center gap-2 mb-3 flex-shrink-0">
                 <Sparkles className="h-4 w-4 flex-shrink-0" style={{ color: theme.accentColor }} />
                 <span className="text-sm font-bold text-foreground">Suggestions IA</span>
                 {hasAnalyzed && (
-                  <Badge variant="secondary" className="text-xs ml-auto"
+                  <Badge variant="secondary" className="text-[10px] ml-auto h-5"
                     style={{ borderColor: `${theme.accentColor}40`, color: theme.accentColor }}>
-                    {Object.values(suggestions).flat().length} idées
+                    {Object.values(suggestions).flat().length}
                   </Badge>
                 )}
               </div>
               <div
-                className="h-0.5 w-full rounded-full mb-3 flex-shrink-0"
-                style={{ background: `linear-gradient(90deg, ${theme.accentColor}60, transparent)` }}
+                className="h-px w-full rounded-full mb-3 flex-shrink-0"
+                style={{ background: `linear-gradient(90deg, ${theme.accentColor}40, transparent)` }}
               />
+
+              {/* ── Info Boss (condensé) ── */}
               {bossReservation && bossBlock && (
-                <div className="mb-3 flex-shrink-0 p-2 rounded-md border text-xs"
+                <div
+                  className="mb-3 flex-shrink-0 p-2 rounded-md border"
                   style={{
-                    borderColor: bossIsLastResort ? `#ef444460` : `${bossColor}40`,
-                    background: bossIsLastResort ? `#ef444408` : `${bossColor}08`,
-                  }}>
-                  <div className="flex items-center gap-1.5 font-medium mb-0.5"
+                    borderColor: bossIsLastResort ? `#ef444460` : `${bossColor}30`,
+                    background: bossIsLastResort ? `#ef444408` : `${bossColor}05`,
+                  }}
+                >
+                  <div className="flex items-center gap-1.5 font-medium text-xs"
                     style={{ color: bossIsLastResort ? '#ef4444' : bossColor }}>
                     {bossIsLastResort
                       ? <ShieldAlert className="h-3 w-3 flex-shrink-0" />
-                      : <span>👑</span>
+                      : <Crown className="h-3 w-3 flex-shrink-0" />
                     }
-                    <span>Boss — {bossBlock.definition.name}</span>
+                    <span className="truncate">{bossBlock.definition.name}</span>
                     <Badge className="text-[9px] px-1 h-4 ml-auto"
                       style={{
                         background: bossIsLastResort ? `#ef444420` : `${bossColor}20`,
@@ -736,58 +1067,151 @@ const BlockPuzzleAssistant: React.FC = () => {
                       {bossBlock.definition.size} cases
                     </Badge>
                   </div>
-                  <p className="text-muted-foreground leading-snug">
+                  <p className="text-[10px] text-muted-foreground leading-snug mt-0.5">
                     {bossIsLastResort
-                      ? <>⚠ <strong className="text-foreground">Dernier recours</strong> — aucun autre bloc disponible. Utilisez le Boss maintenant.</>
-                      : <>Zone réservée à L{bossReservation.row + 1}&nbsp;C{bossReservation.col + 1}. Posez d&apos;abord les blocs gauche/droite.</>
+                      ? <><AlertTriangle className="h-2.5 w-2.5 inline mr-0.5" />Dernier recours — aucun autre bloc disponible.</>
+                      : <>Zone réservée L{bossReservation.row + 1}C{bossReservation.col + 1}. Posez d'abord les autres.</>
                     }
                   </p>
                 </div>
               )}
-              <div className="flex-1 min-h-0">
-                <SuggestionsPanel
-                  suggestions={suggestions}
-                  hand={hand.map((_, i) => ({ slot: i }))}
-                  isLoading={isAnalyzing}
-                  hoveredSuggestion={hoveredSuggestion}
-                  onHoverSuggestion={handleHoverSuggestion}
-                  onApplySuggestion={handleApplySuggestion}
-                />
+
+              {/* ── Liste des suggestions ── */}
+              <div className="flex-1 min-h-0 overflow-y-auto -mx-1 px-1">
+                {learningMode ? (
+                  <div className="flex flex-col items-center justify-center py-8 text-center text-muted-foreground gap-2">
+                    <Brain className="h-6 w-6 text-purple-400" />
+                    <p className="text-xs font-medium text-foreground">Mode Apprentissage actif</p>
+                    <p className="text-[10px] max-w-[200px]">
+                      Les suggestions sont désactivées. Chaque coup que vous jouez est enregistré.
+                    </p>
+                    <p className="text-[9px] mt-1 text-purple-500">{demoCount} coup{demoCount > 1 ? 's' : ''} enregistré{demoCount > 1 ? 's' : ''}</p>
+                  </div>
+                ) : (
+                  <SuggestionsPanel
+                    suggestions={suggestions}
+                    hand={hand.map((_, i) => ({ slot: i }))}
+                    isLoading={isAnalyzing}
+                    hoveredSuggestion={hoveredSuggestion}
+                    onHoverSuggestion={handleHoverSuggestion}
+                    onApplySuggestion={handleApplySuggestion}
+                  />
+                )}
               </div>
 
-              {/* ── Séparateur ── */}
-              <div className="h-px w-full bg-border my-3 flex-shrink-0" />
+              {/* ── Apprentissage par Démonstration ── */}
+              <div className="flex-shrink-0 mt-2 border-t border-border/50 pt-2">
+                <button
+                  className="w-full flex items-center gap-2 hover:opacity-80 transition-opacity"
+                  onClick={() => setLearningMode(v => !v)}
+                >
+                  <Brain className="h-3 w-3 flex-shrink-0 text-purple-500" />
+                  <span className="text-[10px] font-semibold text-foreground flex-1 text-left">
+                    Mode apprentissage
+                  </span>
+                  {learningMode ? (
+                    <span className="text-[9px] text-purple-500 animate-pulse">Enregistrement…</span>
+                  ) : demoCount > 0 ? (
+                    <Badge variant="secondary" className="text-[9px] px-1 h-4">{demoCount}</Badge>
+                  ) : null}
+                  {learningMode
+                    ? <ChevronUp className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                    : <ChevronDown className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                  }
+                </button>
+                {learningMode && (
+                  <div className="mt-2 space-y-2">
+                    <div className="flex gap-1.5">
+                      <button
+                        className="flex-1 text-[10px] px-2 py-1 rounded-md border text-muted-foreground hover:text-foreground transition-colors"
+                        onClick={() => {
+                          pendingExportRef.current = false;
+                          demonWorkerRef.current?.postMessage({ type: 'save' }, undefined as any);
+                        }}
+                      >
+                        Sauvegarder
+                      </button>
+                      <button
+                        className="flex-1 text-[10px] px-2 py-1 rounded-md border text-muted-foreground hover:text-foreground transition-colors"
+                        onClick={() => {
+                          pendingExportRef.current = true;
+                          demonWorkerRef.current?.postMessage({ type: 'save' }, undefined as any);
+                        }}
+                      >
+                        Export
+                      </button>
+                      <button
+                        className="flex-1 text-[10px] px-2 py-1 rounded-md border text-muted-foreground hover:text-foreground transition-colors"
+                        onClick={() => {
+                          const input = document.createElement('input');
+                          input.type = 'file';
+                          input.accept = '.json';
+                          input.onchange = async () => {
+                            const file = input.files?.[0];
+                            if (!file) return;
+                            const text = await file.text();
+                            try { JSON.parse(text); } catch {
+                              toast.error('Fichier invalide');
+                              return;
+                            }
+                            demonWorkerRef.current?.postMessage({ type: 'load', data: text }, undefined as any);
+                            try { localStorage.setItem('block_demos', text); } catch {}
+                            toast.info('Démos importées');
+                          };
+                          input.click();
+                        }}
+                      >
+                        Import
+                      </button>
+                    </div>
+                    <div className="flex gap-1.5">
+                      <button
+                        className="flex-1 text-[10px] px-2 py-1 rounded-md border border-red-300/30 text-red-500 hover:bg-red-500/10 transition-colors"
+                        onClick={() => {
+                          demonWorkerRef.current?.postMessage({ type: 'clear' }, undefined as any);
+                          try { localStorage.removeItem('block_demos'); } catch {}
+                          toast.info('Démos effacées');
+                        }}
+                      >
+                        <Trash2 className="h-2.5 w-2.5 inline mr-0.5" />
+                        Effacer
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {/* ── Notes d'apprentissage IA ── */}
-              <div className="flex-shrink-0">
+              <div className="flex-shrink-0 mt-2 border-t border-border/50 pt-2">
                 <button
-                  className="w-full flex items-center gap-2 mb-2 hover:opacity-80 transition-opacity"
+                  className="w-full flex items-center gap-2 hover:opacity-80 transition-opacity"
                   onClick={() => setShowNotes(v => !v)}
                 >
-                  <BookOpen className="h-3.5 w-3.5 flex-shrink-0 text-primary" />
-                  <span className="text-xs font-semibold text-foreground flex-1 text-left">
-                    Plan d&apos;apprentissage IA
+                  <BookOpen className="h-3 w-3 flex-shrink-0 text-primary" />
+                  <span className="text-[10px] font-semibold text-foreground flex-1 text-left">
+                    Plan apprentissage
                   </span>
                   {activeNotesCount > 0 && (
-                    <Badge variant="secondary" className="text-[10px] px-1.5 h-4 text-primary border-primary/30">
+                    <Badge variant="secondary" className="text-[9px] px-1 h-4 text-primary border-primary/30">
                       {activeNotesCount}
                     </Badge>
                   )}
-                  <Save className="h-3 w-3 text-muted-foreground flex-shrink-0" />
                   {showNotes
-                    ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                    : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                    ? <ChevronUp className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                    : <ChevronDown className="h-3 w-3 text-muted-foreground flex-shrink-0" />
                   }
                 </button>
                 {showNotes && (
-                  <AiNotesPanel
-                    notes={notes}
-                    activeCount={activeNotesCount}
-                    onAdd={addNote}
-                    onRemove={removeNote}
-                    onToggle={toggleNote}
-                    onClearAll={clearAllNotes}
-                  />
+                  <div className="mt-2 max-h-48 overflow-y-auto">
+                    <AiNotesPanel
+                      notes={notes}
+                      activeCount={activeNotesCount}
+                      onAdd={addNote}
+                      onRemove={removeNote}
+                      onToggle={toggleNote}
+                      onClearAll={clearAllNotes}
+                    />
+                  </div>
                 )}
               </div>
             </div>
