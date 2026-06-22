@@ -9,6 +9,7 @@ import {
   findReservedBlockSlot,
 } from '@/lib/predictionEngine';
 import type { ClearMemory, BossReservation } from '@/lib/predictionEngine';
+import { computeBestBlockReservation } from '@/lib/predictionEngine';
 import { getAllCacheStats, clearAllCaches } from '@/lib/aiCache';
 import type { CacheStats } from '@/lib/aiCache';
 import { parseNotesToHints } from '@/lib/aiNotes';
@@ -22,9 +23,11 @@ import { HandSelector } from '@/components/game/HandSelector';
 import { SuggestionsPanel } from '@/components/game/SuggestionsPanel';
 import { GridToolbar } from '@/components/game/GridToolbar';
 import { ThemeConfigPanel } from '@/components/game/ThemeConfigPanel';
+import { BlockEditor, BlockEditorDialog } from '@/components/game/BlockEditor';
 import { ActivityPanel } from '@/components/game/ActivityPanel';
 import { AiNotesPanel } from '@/components/game/AiNotesPanel';
 import { useActivityLog } from '@/hooks/useActivityLog';
+import { useAutoPlay } from '@/hooks/useAutoPlay';
 import { ThemeProvider, useTheme } from '@/contexts/ThemeContext';
 import type { SpaceProject } from '@/lib/spaceProjectEngine';
 import { createSpaceProject } from '@/lib/spaceProjectEngine';
@@ -37,6 +40,7 @@ import {
   Crown, Brain, RefreshCw, Star, PartyPopper, Shuffle,
   Lightbulb, Gamepad2, Swords, ScrollText, GripVertical,
   Search, RotateCcw, Trash2, AlertTriangle, Download, Upload,
+  Play, Square,
 } from 'lucide-react';
 
 const GRID_SIZE = 8;
@@ -97,6 +101,10 @@ const BlockPuzzleAssistant: React.FC = () => {
   const [spaceProject, setSpaceProject] = useState<SpaceProject | null>(null);
   const spaceProjectRef = useRef<SpaceProject | null>(null);
   useEffect(() => { spaceProjectRef.current = spaceProject; }, [spaceProject]);
+
+  // ── Éditeur de blocs ─────────────────────────────────────────────────────
+  const [blockEditorOpen, setBlockEditorOpen] = useState(false);
+  const [editorBlockId, setEditorBlockId] = useState<string | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
   const analyzeReqIdRef = useRef(0);
@@ -203,11 +211,34 @@ const BlockPuzzleAssistant: React.FC = () => {
   useEffect(() => {
     const found = findReservedBlockSlot(boolGrid, hand, manualReservedCells);
     setBossSlot(found >= 0 ? found : -1);
-    const reservation = cellSetToReservation(manualReservedCells, found >= 0 ? found : -1);
+    const reservation = cellSetToReservation(manualReservedCells, found >= 0 ? found : -1, found >= 0 ? hand[found] ?? undefined : undefined);
     setBossReservation(reservation);
     const newProject = createSpaceProject(grid, spaceProjectRef.current);
     setSpaceProject(newProject);
   }, [boolGrid, hand, manualReservedCells]);
+
+  // ── Auto-réservation (aucune réservation manuelle) ─────────────────────
+  useEffect(() => {
+    // Si le joueur a déjà réservé manuellement ou si une réservation existe déjà, ne pas interférer
+    if (manualReservedCells.size > 0) return;
+    if (bossReservation) return;
+    // Ne pas réserver si la grille est vide
+    const filled = grid.flat().filter(c => c.occupied).length;
+    if (filled === 0) return;
+
+    const best = computeBestBlockReservation(boolGrid);
+    if (best) {
+      const reservation: BossReservation = {
+        cells: best.cells,
+        row: best.row,
+        col: best.col,
+        bossBlock: { definition: best.blockDef, rotation: 0, flipped: false, color: theme.accentColor },
+        bossSlot,
+      };
+      setBossReservation(reservation);
+      logInstant('Zone réservée auto', 'done', `${best.blockDef.name} — ${best.cells.length} cases`);
+    }
+  }, [boolGrid, manualReservedCells.size, bossReservation, grid, theme.accentColor, bossSlot, logInstant]);
 
   const occupiedCount = grid.flat().filter(c => c.occupied).length;
 
@@ -387,7 +418,7 @@ const BlockPuzzleAssistant: React.FC = () => {
             if (dmsg.results?.length > 0) {
               const boosted: Record<number, Suggestion[]> = {};
               for (const [slotKey, suggestions] of Object.entries(result)) {
-                boosted[slotKey] = suggestions.map(s => {
+                boosted[Number(slotKey)] = suggestions.map(s => {
                   const match = (dmsg.results as any[]).find((r: any) =>
                     r.move.blockId === s.blockInstance.definition.id &&
                     r.move.rotation === s.blockInstance.rotation &&
@@ -657,6 +688,26 @@ const BlockPuzzleAssistant: React.FC = () => {
     setHoveredSuggestion(null);
   }, [grid, hand, suggestions, refillHandIfEmpty, triggerPlacementResult, buildNewMemory, logInstant, refillLearningSlot]);
 
+  // ── Auto-play hook ─────────────────────────────────────────────────────
+  const handleShuffleSlotWrapped = useCallback((slot: number) => {
+    handleShuffleSlot(slot as 0 | 1 | 2);
+  }, [handleShuffleSlot]);
+  const autoPlayDeps = useCallback(() => ({
+    grid,
+    hand,
+    bossReservation,
+    bossSlot,
+    suggestions,
+    hasAnalyzed,
+  }), [grid, hand, bossReservation, bossSlot, suggestions, hasAnalyzed]);
+  const autoPlay = useAutoPlay(autoPlayDeps, {
+    onApplySuggestion: handleApplySuggestion,
+    onShuffleSlot: handleShuffleSlotWrapped,
+    onAnalyze: handleAnalyze,
+    onSetBossReservation: setBossReservation,
+    onSetBossSlot: setBossSlot,
+  });
+
   // ── Placer un bloc (drag, clavier) ───────────────────────────────────────
   const placeBlock = useCallback(
     (block: BlockInstance, slotIndex: number, anchorRow: number, anchorCol: number): boolean => {
@@ -860,6 +911,34 @@ const BlockPuzzleAssistant: React.FC = () => {
               }}
             >
               <Upload className="h-3.5 w-3.5" />
+            </button>
+            <button
+              className={`h-7 rounded-md border flex items-center justify-center hover:bg-muted/50 transition-colors px-2 gap-1 ${
+                autoPlay.isPlaying ? 'border-red-400 text-red-500' : 'border-border'
+              }`}
+              title={autoPlay.isPlaying ? 'Arrêter le jeu automatique' : 'Jouer automatiquement'}
+              onClick={autoPlay.isPlaying ? autoPlay.stop : autoPlay.start}
+            >
+              {autoPlay.isPlaying ? (
+                <Square className="h-3.5 w-3.5 fill-current" />
+              ) : (
+                <Play className="h-3.5 w-3.5" />
+              )}
+              <span className="text-[10px] font-medium hidden sm:inline">
+                {autoPlay.isPlaying ? 'Stop' : 'Auto'}
+              </span>
+            </button>
+            {autoPlay.status && (
+              <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[120px]">
+                {autoPlay.status}
+              </span>
+            )}
+            <button
+              className="h-7 w-7 rounded-md border border-border flex items-center justify-center hover:bg-muted/50 transition-colors"
+              title="Éditeur de blocs"
+              onClick={() => { setEditorBlockId(null); setBlockEditorOpen(true); }}
+            >
+              <Puzzle className="h-3.5 w-3.5" />
             </button>
             <ThemeConfigPanel />
           </div>
@@ -1241,6 +1320,11 @@ const BlockPuzzleAssistant: React.FC = () => {
           />
         );
       })()}
+      <BlockEditorDialog
+        open={blockEditorOpen}
+        onOpenChange={setBlockEditorOpen}
+        editBlockId={editorBlockId}
+      />
     </div>
   );
 };

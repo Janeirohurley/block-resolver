@@ -1,7 +1,7 @@
 // Sélecteur de blocs pour la main du joueur (3 slots) — avec drag & drop et Boss
 import React, { useState, useRef } from 'react';
 import type { BlockInstance, BlockDefinition } from '@/types/types';
-import { BLOCK_CATALOG, BLOCKS_BY_SERIES } from '@/data/blockCatalog';
+import * as blockCatalogService from '@/lib/blockCatalogService';
 import { BlockPreview } from '@/components/game/BlockPreview';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useDrag } from '@/contexts/DragContext';
@@ -52,7 +52,7 @@ const HandSlot: React.FC<HandSlotProps> = ({
   const [selectedColor, setSelectedColor] = useState(theme.blockColors[slot] || theme.accentColor);
   const dragImgRef = useRef<HTMLDivElement | null>(null);
 
-  const filteredBlocks = BLOCK_CATALOG.filter(b =>
+  const filteredBlocks = blockCatalogService.getAllBlocks().filter(b =>
     b.id.toLowerCase().includes(search.toLowerCase())
   );
 
@@ -118,7 +118,7 @@ const HandSlot: React.FC<HandSlotProps> = ({
             className={cn(
               'flex items-center justify-center min-h-[72px] cursor-grab active:cursor-grabbing',
               'rounded-md px-2 py-1 hover:bg-muted/40 transition-colors select-none',
-              'focus:outline-none focus:ring-2 focus:ring-primary/50'
+              'overflow-x-auto focus:outline-none focus:ring-2 focus:ring-primary/50'
             )}
             tabIndex={0}
             aria-label={`Glisser le bloc ${block.definition.name} depuis le slot ${slot + 1}`}
@@ -171,7 +171,10 @@ const HandSlot: React.FC<HandSlotProps> = ({
           )}
         </>
       ) : (
-        <Dialog open={open} onOpenChange={setOpen}>
+        <Dialog open={open}
+         onOpenChange={setOpen}
+         
+         >
           <DialogTrigger asChild>
             <Button variant="outline" size="sm" className="h-14 w-full border-dashed">
               <Plus className="h-4 w-4 mr-1" />
@@ -217,7 +220,7 @@ const HandSlot: React.FC<HandSlotProps> = ({
               
             </div>
             <ScrollArea className="flex-1 min-h-0">
-              <div className="space-y-4 pr-2">
+              <div className="space-y-4 pr-2 h-screen">
                 {search ? (
                   <div className="grid grid-cols-4 md:grid-cols-6 gap-2">
                     {filteredBlocks.map(def => (
@@ -226,7 +229,7 @@ const HandSlot: React.FC<HandSlotProps> = ({
                     ))}
                   </div>
                 ) : (
-                  Object.entries(BLOCKS_BY_SERIES)
+                  Object.entries(blockCatalogService.getBlocksBySeries())
                     .sort(([a], [b]) => a.localeCompare(b))
                     .map(([series, blocks]) => (
                       <div key={series}>

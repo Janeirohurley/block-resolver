@@ -3,7 +3,7 @@
 //   Construire des configurations permettant des destructions MULTIPLES simultanées.
 //   L'IA connaît tout le catalogue et imagine les blocs futurs.
 //   Le bloc du MILIEU (slot 1) est le "Boss" — le plus grand — on lui réserve sa zone.
-import type { BlockInstance, Suggestion, Grid } from '@/types/types';
+import type { BlockDefinition, BlockInstance, Suggestion, Grid } from '@/types/types';
 import {
   getUniqueTransforms,
   getInstanceShape,
@@ -82,7 +82,11 @@ function applyAndClear(
   col: number
 ): { grid: boolean[][]; totalClears: number; linesCleared: number; colsCleared: number } {
   const g = grid.map(r => [...r]);
-  for (const [dr, dc] of shape) g[row + dr][col + dc] = true;
+  for (const [dr, dc] of shape) {
+    const r = row + dr;
+    const c = col + dc;
+    if (r >= 0 && r < GRID_SIZE && c >= 0 && c < GRID_SIZE) g[r][c] = true;
+  }
 
   let linesCleared = 0;
   let colsCleared = 0;
@@ -109,7 +113,11 @@ function getClears(
   col: number
 ): { clearedLines: number[]; clearedCols: number[] } {
   const g = grid.map(r => [...r]);
-  for (const [dr, dc] of shape) g[row + dr][col + dc] = true;
+  for (const [dr, dc] of shape) {
+    const r = row + dr;
+    const c = col + dc;
+    if (r >= 0 && r < GRID_SIZE && c >= 0 && c < GRID_SIZE) g[r][c] = true;
+  }
   const clearedLines: number[] = [];
   const clearedCols: number[] = [];
   for (let r = 0; r < GRID_SIZE; r++) if (g[r].every(Boolean)) clearedLines.push(r);
@@ -547,7 +555,7 @@ function suggestionsForBlock(
           score: Math.round(s.totalScore),
           linesCleared: s.linesCleared,
           colsCleared: s.colsCleared,
-          cellsFreed: (s.linesCleared + s.colsCleared) * GRID_SIZE,
+          cellsFreed: s.linesCleared * GRID_SIZE + s.colsCleared * GRID_SIZE - s.linesCleared * s.colsCleared,
           affectedCells: shape.map(([dr, dc]) => [row + dr, col + dc] as [number, number]),
           clearedLines: s.clearedLines,
           clearedCols: s.clearedCols,
@@ -662,7 +670,8 @@ export function reservationToCellSet(reservation: BossReservation | null): Set<s
  */
 export function cellSetToReservation(
   cells: Set<string>,
-  slot: number
+  slot: number,
+  bossBlock?: BlockInstance
 ): BossReservation | null {
   if (cells.size === 0) return null;
   const cellArray: [number, number][] = [];
@@ -672,7 +681,7 @@ export function cellSetToReservation(
   }
   const minRow = Math.min(...cellArray.map(([r]) => r));
   const minCol = Math.min(...cellArray.map(([, c]) => c));
-  return { row: minRow, col: minCol, bossSlot: slot, cells: cellArray };
+  return { row: minRow, col: minCol, bossSlot: slot, bossBlock: bossBlock ?? cellArray as any, cells: cellArray };
 }
 
 /**
@@ -987,4 +996,33 @@ export function suggestOneBlock(
   const result: BlockInstance = { definition: pick.def, rotation: 0, flipped: false, color: pick.color };
   oneBlockCache.set(cacheKey, result);
   return result;
+}
+
+/**
+ * Trouve le plus grand bloc du catalogue qui peut être placé sur la grille actuelle.
+ * Utilisé pour l'auto-réservation : on réserve l'espace pour le meilleur bloc possible,
+ * puis on attend qu'il arrive dans la main pour le jouer en dernier recours.
+ */
+export function computeBestBlockReservation(
+  grid: boolean[][],
+): { blockDef: BlockDefinition; cells: Array<[number, number]>; row: number; col: number } | null {
+  const sorted = [...BLOCK_CATALOG].sort((a, b) => b.size - a.size);
+  for (const def of sorted) {
+    const transforms = getUniqueTransforms(def, '#000000');
+    for (const instance of transforms) {
+      const shape = getInstanceShape(instance);
+      for (let row = 0; row < GRID_SIZE; row++) {
+        for (let col = 0; col < GRID_SIZE; col++) {
+          if (!canPlace(grid, shape, row, col)) continue;
+          return {
+            blockDef: def,
+            cells: shape.map(([dr, dc]) => [row + dr, col + dc] as [number, number]),
+            row,
+            col,
+          };
+        }
+      }
+    }
+  }
+  return null;
 }

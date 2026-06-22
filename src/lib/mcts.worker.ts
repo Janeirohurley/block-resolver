@@ -30,6 +30,7 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       );
       self.postMessage({ type: 'result', suggestions: result, totalSims, total }, undefined as any);
     } catch (err) {
+      console.error('[MCTS Worker]', err);
       self.postMessage({ type: 'error', error: String(err) }, undefined as any);
     }
   }

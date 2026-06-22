@@ -147,7 +147,11 @@ function getClearsBool(
   col: number
 ): { linesCleared: number; colsCleared: number } {
   const g = grid.map(r => [...r]);
-  for (const [dr, dc] of shape) g[row + dr][col + dc] = true;
+  for (const [dr, dc] of shape) {
+    const r = row + dr;
+    const c = col + dc;
+    if (r >= 0 && r < GRID_SIZE && c >= 0 && c < GRID_SIZE) g[r][c] = true;
+  }
 
   let linesCleared = 0;
   let colsCleared = 0;
@@ -185,6 +189,7 @@ function evalGridFast(grid: boolean[][]): number {
 // ─── Génération de blocs aléatoires pour les simulations ─────────────────
 
 function randomBlocks(count: number): BlockInstance[] {
+  if (BLOCK_CATALOG.length === 0) return [];
   const result: BlockInstance[] = [];
   const used = new Set<string>();
   for (let i = 0; i < count; i++) {
@@ -594,7 +599,7 @@ export function generateMCSTSuggestions(
             score: Math.round(combinedScore),
             linesCleared: p.linesCleared,
             colsCleared: p.colsCleared,
-            cellsFreed: (p.linesCleared + p.colsCleared) * GRID_SIZE,
+            cellsFreed: p.linesCleared * GRID_SIZE + p.colsCleared * GRID_SIZE - p.linesCleared * p.colsCleared,
             affectedCells: p.shape.map(([dr, dc]) => [p.row + dr, p.col + dc] as [number, number]),
             clearedLines: [],
             clearedCols: [],

@@ -55,7 +55,11 @@ function getClearsBool(
   col: number
 ): { clearedLines: number[]; clearedCols: number[] } {
   const g = grid.map(r => [...r]);
-  for (const [dr, dc] of shape) g[row + dr][col + dc] = true;
+  for (const [dr, dc] of shape) {
+    const r = row + dr;
+    const c = col + dc;
+    if (r >= 0 && r < GRID_SIZE && c >= 0 && c < GRID_SIZE) g[r][c] = true;
+  }
   const clearedLines: number[] = [];
   const clearedCols: number[] = [];
   for (let r = 0; r < GRID_SIZE; r++) if (g[r].every(Boolean)) clearedLines.push(r);
@@ -70,7 +74,11 @@ function applyAndClearBool(
   col: number
 ): { grid: boolean[][]; linesCleared: number[]; colsCleared: number[] } {
   const g = grid.map(r => [...r]);
-  for (const [dr, dc] of shape) g[row + dr][col + dc] = true;
+  for (const [dr, dc] of shape) {
+    const r = row + dr;
+    const c = col + dc;
+    if (r >= 0 && r < GRID_SIZE && c >= 0 && c < GRID_SIZE) g[r][c] = true;
+  }
   const linesCleared: number[] = [];
   const colsCleared: number[] = [];
   for (let r = 0; r < GRID_SIZE; r++) if (g[r].every(Boolean)) linesCleared.push(r);
@@ -174,7 +182,7 @@ export function evaluateMove(
   reservedCells?: Set<string>,
 ): SpaceMoveEval {
   const profile = project.voidProfile;
-  const { linesCleared, colsCleared } = getClearsBool(grid, shape, row, col);
+  const { clearedLines: linesCleared, clearedCols: colsCleared } = getClearsBool(grid, shape, row, col);
 
   // ── A. Cohérence avec le vide ────────────────────────────────────────────
   // Bonus si le placement remplit des cellules dans les zones de vide
@@ -322,7 +330,7 @@ export function getSuggestionsForBlock(
           scoreBreakdown.push({ label: 'Zone réservée touchée', value: -evalScore.reservedPenalty, icon: '🚫' });
         }
 
-        const isTrigger = clearedLines.length + colsCleared.length > 0;
+        const isTrigger = clearedLines.length + clearedCols.length > 0;
         const isScatter = evalScore.scatterPenalty > evalScore.coherence;
         const isVoidPlay = evalScore.coherence > 0;
         const isReservedHit = evalScore.reservedPenalty > 0;
@@ -381,7 +389,7 @@ export function getSuggestionsForBlock(
           score: Math.round(evalScore.score),
           linesCleared: clearedLines.length,
           colsCleared: clearedCols.length,
-          cellsFreed: (clearedLines.length + clearedCols.length) * GRID_SIZE,
+          cellsFreed: clearedLines.length * GRID_SIZE + clearedCols.length * GRID_SIZE - clearedLines.length * clearedCols.length,
           affectedCells: shape.map(([dr, dc]) => [row + dr, col + dc] as [number, number]),
           clearedLines,
           clearedCols,

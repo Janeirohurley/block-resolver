@@ -97,16 +97,16 @@ export const BLOCK_CATALOG: BlockDefinition[] = [
     series: "F",
     size: 9,
     shape: [
-      [0, 1],
       [0, 2],
       [0, 3],
+      [0, 4],
       [1, 0],
       [1, 1],
-      [1, -1],
-      [2, 1],
-      [3, 1],
-      [4, 1],
-    ], // carré 3x3
+      [1, 2],
+      [2, 2],
+      [3, 2],
+      [4, 2],
+    ],
   },
 
   // === Série I ===
@@ -533,7 +533,6 @@ export const BLOCK_CATALOG: BlockDefinition[] = [
       [1, 2],
       [1, 1],
       [2, 1],
-      [2, 1],
       [2, 0],
     ], // W pentomino
   },
@@ -655,7 +654,7 @@ export const BLOCK_CATALOG: BlockDefinition[] = [
     id: "Z-9",
     name: "Z-9",
     series: "Z",
-    size: 9,
+    size: 8,
     shape: [
       [0, 0],
       [0, 1],
