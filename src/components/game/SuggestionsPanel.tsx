@@ -14,6 +14,7 @@ interface SuggestionCardProps {
   isHovered: boolean;
   onHover: (suggestion: Suggestion | null) => void;
   onApply?: (suggestion: Suggestion) => void;
+  onDetail?: (suggestion: Suggestion) => void;
   slotLabel: string;
 }
 
@@ -29,6 +30,7 @@ const SuggestionCard: React.FC<SuggestionCardProps> = ({
   isHovered,
   onHover,
   onApply,
+  onDetail,
   slotLabel,
 }) => {
   const block = suggestion.blockInstance;
@@ -45,6 +47,7 @@ const SuggestionCard: React.FC<SuggestionCardProps> = ({
       )}
       onMouseEnter={() => onHover(suggestion)}
       onMouseLeave={() => onHover(null)}
+      onClick={() => onDetail?.(suggestion)}
     >
       <div className="flex items-start gap-2.5">
         {/* Badge de rang */}
@@ -122,6 +125,15 @@ const SuggestionCard: React.FC<SuggestionCardProps> = ({
           >
             <Eye className="h-3.5 w-3.5" />
           </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            title="Détails et raisonnement"
+            onClick={e => { e.stopPropagation(); onDetail?.(suggestion); }}
+          >
+            <span className="text-xs">🔍</span>
+          </Button>
           {onApply && (
             <Button
               variant="ghost"
@@ -146,6 +158,7 @@ interface SuggestionsPanelProps {
   hoveredSuggestion?: Suggestion | null;
   onHoverSuggestion: (suggestion: Suggestion | null) => void;
   onApplySuggestion?: (suggestion: Suggestion) => void;
+  onSuggestionDetail?: (suggestion: Suggestion) => void;
 }
 
 export const SuggestionsPanel: React.FC<SuggestionsPanelProps> = ({
@@ -155,6 +168,7 @@ export const SuggestionsPanel: React.FC<SuggestionsPanelProps> = ({
   hoveredSuggestion,
   onHoverSuggestion,
   onApplySuggestion,
+  onSuggestionDetail,
 }) => {
   const allSuggestions: Array<{ suggestion: Suggestion; slot: number }> = [];
   Object.entries(suggestions).forEach(([slotStr, arr]) => {
@@ -233,6 +247,7 @@ export const SuggestionsPanel: React.FC<SuggestionsPanelProps> = ({
               isHovered={hoveredSuggestion?.id === suggestion.id}
               onHover={onHoverSuggestion}
               onApply={onApplySuggestion}
+              onDetail={onSuggestionDetail}
             />
           </React.Fragment>
         ))}

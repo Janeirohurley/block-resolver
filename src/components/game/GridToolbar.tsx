@@ -5,19 +5,21 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import { Eraser, Trash2, Grid, Lightbulb, Brain } from 'lucide-react';
+import { Eraser, Trash2, Grid, Lightbulb, Brain, Lock } from 'lucide-react';
 
 interface GridToolbarProps {
   selectedColor: string;
   onColorChange: (color: string) => void;
-  mode: 'paint' | 'erase';
-  onModeChange: (mode: 'paint' | 'erase') => void;
+  mode: 'paint' | 'erase' | 'reserve';
+  onModeChange: (mode: 'paint' | 'erase' | 'reserve') => void;
   onClearGrid: () => void;
   occupiedCount: number;
   onAnalyze: () => void;
   isAnalyzing?: boolean;
   learningMode?: boolean;
   learningCount?: number;
+  reservedCount?: number;
+  onClearReservation?: () => void;
 }
 
 export const GridToolbar: React.FC<GridToolbarProps> = ({
@@ -31,6 +33,8 @@ export const GridToolbar: React.FC<GridToolbarProps> = ({
   isAnalyzing,
   learningMode,
   learningCount,
+  reservedCount,
+  onClearReservation,
 }) => {
   const { theme } = useTheme();
 
@@ -68,7 +72,38 @@ export const GridToolbar: React.FC<GridToolbarProps> = ({
             <Eraser className="h-3 w-3" />
             Effacer
           </button>
+          <button
+            type="button"
+            onClick={() => onModeChange('reserve')}
+            className={cn(
+              'px-3 py-1.5 text-xs font-medium transition-all flex items-center gap-1.5',
+              mode === 'reserve'
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-card text-muted-foreground hover:bg-muted'
+            )}
+          >
+            <Lock className="h-3 w-3" />
+            Réserver
+          </button>
         </div>
+
+        {/* Mode réservation — zone réservée */}
+        {mode === 'reserve' && reservedCount !== undefined && (
+          <div className="flex items-center gap-1.5">
+            <Badge variant="secondary" className="text-[10px] font-mono h-6">
+              {reservedCount} cellules réservées
+            </Badge>
+            {reservedCount > 0 && onClearReservation && (
+              <button
+                type="button"
+                onClick={onClearReservation}
+                className="text-[10px] text-muted-foreground hover:text-destructive underline underline-offset-2"
+              >
+                Effacer
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Color picker */}
         {mode === 'paint' && (

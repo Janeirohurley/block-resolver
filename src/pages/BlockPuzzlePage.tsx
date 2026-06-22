@@ -1,12 +1,12 @@
 // Page principale de l'assistant Block Puzzle — v15 (Boss valide + Cache IA + Journal + Notes IA + Persistance)
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { Grid, BlockInstance, Suggestion, CellState } from '@/types/types';
 import {
   suggestOneBlock,
   suggestNextBlocks,
-  findBossSlot,
-  computeBossReservation,
   reservationToCellSet,
+  cellSetToReservation,
+  findReservedBlockSlot,
 } from '@/lib/predictionEngine';
 import type { ClearMemory, BossReservation } from '@/lib/predictionEngine';
 import { getAllCacheStats, clearAllCaches } from '@/lib/aiCache';
@@ -26,6 +26,9 @@ import { ActivityPanel } from '@/components/game/ActivityPanel';
 import { AiNotesPanel } from '@/components/game/AiNotesPanel';
 import { useActivityLog } from '@/hooks/useActivityLog';
 import { ThemeProvider, useTheme } from '@/contexts/ThemeContext';
+import type { SpaceProject } from '@/lib/spaceProjectEngine';
+import { createSpaceProject } from '@/lib/spaceProjectEngine';
+import { SuggestionDetailModal } from '@/components/game/SuggestionDetailModal';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
 import {
@@ -61,8 +64,9 @@ const BlockPuzzleAssistant: React.FC = () => {
   const hydrated = savedState ? hydrateState(savedState) : null;
 
   const [grid, setGrid] = useState<Grid>(() => hydrated?.grid ?? createEmptyGrid());
-  const [paintMode, setPaintMode] = useState<'paint' | 'erase'>('paint');
+  const [paintMode, setPaintMode] = useState<'paint' | 'erase' | 'reserve'>('paint');
   const [selectedColor, setSelectedColor] = useState(theme.blockColors[0]);
+  const [manualReservedCells, setManualReservedCells] = useState<Set<string>>(new Set());
   const [hand, setHand] = useState<Array<BlockInstance | null>>(() => hydrated?.hand ?? [null, null, null]);
   const [suggestions, setSuggestions] = useState<Record<number, Suggestion[]>>({});
   const [hoveredSuggestion, setHoveredSuggestion] = useState<Suggestion | null>(null);
@@ -74,6 +78,7 @@ const BlockPuzzleAssistant: React.FC = () => {
   const [learningMode, setLearningMode] = useState(false);
   const learningModeRef = useRef(false);
   const [demoCount, setDemoCount] = useState(0);
+  const [detailSuggestion, setDetailSuggestion] = useState<Suggestion | null>(null);
 
   // ── Score & animation ────────────────────────────────────────────────────
   const [score, setScore] = useState(() => hydrated?.score ?? 0);
@@ -89,6 +94,9 @@ const BlockPuzzleAssistant: React.FC = () => {
   const [clearMemory, setClearMemory] = useState<ClearMemory[]>(() => hydrated?.clearMemory ?? []);
   const turnCountRef = useRef(hydrated?.turnCount ?? 0);
   const prevBossReservationRef = useRef<BossReservation | null>(hydrated?.bossReservation ?? null);
+  const [spaceProject, setSpaceProject] = useState<SpaceProject | null>(null);
+  const spaceProjectRef = useRef<SpaceProject | null>(null);
+  useEffect(() => { spaceProjectRef.current = spaceProject; }, [spaceProject]);
 
   const workerRef = useRef<Worker | null>(null);
   const analyzeReqIdRef = useRef(0);
@@ -181,45 +189,25 @@ const BlockPuzzleAssistant: React.FC = () => {
   // ── Persistance automatique de la partie ────────────────────────────────
   useGamePersistence({ grid, hand, score, bossSlot, clearMemory, turnCount: turnCountRef.current, bossReservation });
 
-  // ── Recalcul Boss (avec vérification de placement valide) ────────────────
-  const recomputeBoss = useCallback(
-    (currentGrid: Grid, currentHand: Array<BlockInstance | null>, currentMemory: ClearMemory[]) => {
-      const actId = startActivity('Calcul zone Boss', 'Recherche du meilleur bloc plaçable…');
-      const t0 = Date.now();
+  // Cellules réservées (auto via boss + manuelles)
+  const autoReserved = reservationToCellSet(bossReservation);
+  const reservedZoneCells = useMemo(() => {
+    if (manualReservedCells.size === 0) return autoReserved;
+    const merged = new Set(autoReserved);
+    for (const key of manualReservedCells) merged.add(key);
+    return merged;
+  }, [autoReserved, manualReservedCells]);
 
-      // findBossSlot reçoit la grille → vérifie que le boss peut être placé
-      const newBossSlot = findBossSlot(currentHand, currentGrid);
-      setBossSlot(newBossSlot);
-      const bossBlock = currentHand[newBossSlot];
-
-      if (!bossBlock) {
-        setBossReservation(null);
-        prevBossReservationRef.current = null;
-        finishActivity(actId, 'done', 'Main vide — pas de boss');
-        refreshCacheStats();
-        return;
-      }
-
-      const reservation = computeBossReservation(currentGrid, bossBlock, newBossSlot, currentMemory, prevBossReservationRef.current);
-      prevBossReservationRef.current = reservation;
-      setBossReservation(reservation);
-
-      const ms = Date.now() - t0;
-      if (ms < 2) {
-        finishActivity(actId, 'cached', `Slot ${newBossSlot + 1} → ${bossBlock.definition.name}`);
-      } else {
-        finishActivity(actId, 'done', `Slot ${newBossSlot + 1} → ${bossBlock.definition.name} (${ms} ms)`);
-      }
-      refreshCacheStats();
-    },
-    [startActivity, finishActivity, refreshCacheStats]
-  );
-
-  // Recalculer le boss quand la main change
+  // ── Trouver le bloc réservé (celui qui matche la zone manuelle) ────────
+  const boolGrid = useMemo(() => gridToBool(grid), [grid]);
   useEffect(() => {
-    recomputeBoss(grid, hand, clearMemory);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hand]);
+    const found = findReservedBlockSlot(boolGrid, hand, manualReservedCells);
+    setBossSlot(found >= 0 ? found : -1);
+    const reservation = cellSetToReservation(manualReservedCells, found >= 0 ? found : -1);
+    setBossReservation(reservation);
+    const newProject = createSpaceProject(grid, spaceProjectRef.current);
+    setSpaceProject(newProject);
+  }, [boolGrid, hand, manualReservedCells]);
 
   const occupiedCount = grid.flat().filter(c => c.occupied).length;
 
@@ -227,6 +215,19 @@ const BlockPuzzleAssistant: React.FC = () => {
   const handleCellClick = useCallback(
     (row: number, col: number) => {
       if (kbSlot !== null) return;
+      if (paintMode === 'reserve') {
+        setManualReservedCells(prev => {
+          const key = `${row},${col}`;
+          const next = new Set(prev);
+          if (next.has(key)) {
+            next.delete(key);
+          } else {
+            next.add(key);
+          }
+          return next;
+        });
+        return;
+      }
       setGrid(prev => {
         const next = prev.map(r => r.map(c => ({ ...c })));
         if (paintMode === 'erase') {
@@ -268,7 +269,7 @@ const BlockPuzzleAssistant: React.FC = () => {
         .filter((b): b is BlockInstance => b !== null)
         .map(b => b.definition.id);
       const t0 = Date.now();
-      const newBlock = suggestOneBlock(grid, theme.blockColors, excludeIds, bossReservation, clearMemory);
+      const newBlock = suggestOneBlock(grid, theme.blockColors, excludeIds, bossReservation, clearMemory, undefined, undefined, reservedZoneCells);
       const ms = Date.now() - t0;
       if (!newBlock) {
         finishActivity(actId, 'error', 'Aucun bloc compatible');
@@ -297,7 +298,7 @@ const BlockPuzzleAssistant: React.FC = () => {
       });
     },
     [bossSlot, hand, grid, theme.blockColors, bossReservation, clearMemory,
-      startActivity, finishActivity, refreshCacheStats]
+      startActivity, finishActivity, refreshCacheStats, reservedZoneCells]
   );
 
   // ── Analyse (via Web Worker MCTS) ────────────────────────────────────────
@@ -432,7 +433,9 @@ const BlockPuzzleAssistant: React.FC = () => {
     };
 
     const hints = parseNotesToHints(notes);
-    const reservedCells = bossReservation?.cells.map(([r, c]) => `${r},${c}`) ?? undefined;
+    const reservedCells = bossReservation
+      ? bossReservation.cells.map(([r, c]) => `${r},${c}`)
+      : undefined;
     worker.postMessage({
       type: 'analyze',
       grid,
@@ -441,8 +444,9 @@ const BlockPuzzleAssistant: React.FC = () => {
       config: { iterations: 400, timeBudget: 3000 },
       reservedCells,
       bossSlot: bossReservation?.bossSlot,
+      spaceProject: spaceProjectRef.current,
     });
-  }, [grid, hand, bossReservation, notes, activeNotesCount, startActivity, finishActivity, refreshCacheStats]);
+  }, [grid, hand, bossReservation, notes, activeNotesCount, startActivity, finishActivity, refreshCacheStats, spaceProjectRef]);
 
   // ── Effacer la grille ────────────────────────────────────────────────────
   const handleClearGrid = useCallback(() => {
@@ -455,7 +459,7 @@ const BlockPuzzleAssistant: React.FC = () => {
     setExplodingCells(new Set());
     setScorePopup(null);
     setBossReservation(null);
-    prevBossReservationRef.current = null;
+    setManualReservedCells(new Set());
     setClearMemory([]);
     turnCountRef.current = 0;
     clearAllCaches();
@@ -481,11 +485,11 @@ const BlockPuzzleAssistant: React.FC = () => {
       const excludeIds = currentBlocks.map(b => b.definition.id);
       const excludeSeries = currentBlocks.map(b => b.definition.series);
       const color = theme.blockColors[slotIndex] || theme.blockColors[0];
-      const newBlock = suggestOneBlock(currentGrid, theme.blockColors, excludeIds, bossReservation, clearMemory, excludeSeries);
+      const newBlock = suggestOneBlock(currentGrid, theme.blockColors, excludeIds, bossReservation, clearMemory, excludeSeries, spaceProjectRef.current, reservedZoneCells);
       if (!newBlock) return null;
       return { ...newBlock, color };
     },
-    [theme.blockColors, bossReservation, clearMemory]
+    [theme.blockColors, bossReservation, clearMemory, reservedZoneCells]
   );
 
   // ── Recharger la main si tous les slots sont vides ──────────────────────
@@ -500,18 +504,17 @@ const BlockPuzzleAssistant: React.FC = () => {
       const ms = Date.now() - t0;
       const fromCache = ms < 2;
       finishActivity(actId, fromCache ? 'cached' : 'done',
-        `Boss → ${suggested[1]?.definition.name ?? '?'} ${fromCache ? '(cache)' : `(${ms} ms)`}`);
+        `Main → ${suggested.map(b => b?.definition.name).filter(Boolean).join(', ') || '?'} ${fromCache ? '(cache)' : `(${ms} ms)`}`);
       refreshCacheStats();
       toast.info("✨ Nouvelle main générée par l'IA", {
         description: fromCache
           ? '⚡ Résultat instantané (cache IA)'
-          : 'Bloc central = 👑 Boss (le plus grand).',
+          : 'Réserve manuellement une zone pour guider le choix des blocs.',
         duration: 3000,
       });
-      setTimeout(() => recomputeBoss(currentGrid, suggested as Array<BlockInstance | null>, currentMemory), 0);
       return suggested as Array<BlockInstance | null>;
     },
-    [theme.blockColors, recomputeBoss, startActivity, finishActivity, refreshCacheStats]
+    [theme.blockColors, startActivity, finishActivity, refreshCacheStats]
   );
 
   // ── Logique centrale : placer un bloc + effacer lignes/cols + score ───────
@@ -547,13 +550,11 @@ const BlockPuzzleAssistant: React.FC = () => {
         explodeTimerRef.current = setTimeout(() => {
           setExplodingCells(new Set());
           if (newHand) setHand(newHand);
-          recomputeBoss(newGrid, newHand ?? [], newMemory);
           setSuggestions({});
           setHasAnalyzed(false);
         }, isAmazing ? 1200 : 500);
       } else {
         if (newHand) setHand(newHand);
-        recomputeBoss(newGrid, newHand ?? [], newMemory);
         setSuggestions({});
         setHasAnalyzed(false);
       }
@@ -581,7 +582,7 @@ const BlockPuzzleAssistant: React.FC = () => {
         });
       }
     },
-    [recomputeBoss, logInstant]
+    [logInstant]
   );
 
   // Construit la nouvelle mémoire après un placement
@@ -746,8 +747,6 @@ const BlockPuzzleAssistant: React.FC = () => {
     [kbSlot, hand, placeBlock]
   );
 
-  // Cellules réservées pour l'overlay boss
-  const reservedZoneCells = reservationToCellSet(bossReservation);
   const bossBlock = hand[bossSlot];
   const bossColor = bossBlock?.color ?? theme.accentColor;
 
@@ -887,6 +886,8 @@ const BlockPuzzleAssistant: React.FC = () => {
                 isAnalyzing={isAnalyzing}
                 learningMode={learningMode}
                 learningCount={demoCount}
+                reservedCount={manualReservedCells.size}
+                onClearReservation={() => setManualReservedCells(new Set())}
               />
             </div>
 
@@ -1010,7 +1011,7 @@ const BlockPuzzleAssistant: React.FC = () => {
                 <div className="flex items-start gap-2 px-3 md:px-4 pb-3 text-[10px] text-muted-foreground border-t border-border/30 pt-2">
                   <Lightbulb className="h-3 w-3 mt-0.5 flex-shrink-0 text-primary/60" />
                   <p className="text-pretty leading-snug">
-                    <strong className="text-foreground">Aide :</strong> Glissez un bloc → grille. <Crown className="h-2.5 w-2.5 inline" /> Boss = dernier recours. Touches{' '}
+                    <strong className="text-foreground">Aide :</strong> Glissez un bloc → grille. <Crown className="h-2.5 w-2.5 inline" /> Réservé = dernier recours. Touches{' '}
                     <kbd className="px-0.5 rounded bg-muted font-mono text-[9px]">1</kbd>
                     <kbd className="px-0.5 rounded bg-muted font-mono text-[9px]">2</kbd>
                     <kbd className="px-0.5 rounded bg-muted font-mono text-[9px]">3</kbd> + flèches.
@@ -1042,7 +1043,7 @@ const BlockPuzzleAssistant: React.FC = () => {
                 style={{ background: `linear-gradient(90deg, ${theme.accentColor}40, transparent)` }}
               />
 
-              {/* ── Info Boss (condensé) ── */}
+              {/* ── Info Bloc Réservé ── */}
               {bossReservation && bossBlock && (
                 <div
                   className="mb-3 flex-shrink-0 p-2 rounded-md border"
@@ -1057,7 +1058,7 @@ const BlockPuzzleAssistant: React.FC = () => {
                       ? <ShieldAlert className="h-3 w-3 flex-shrink-0" />
                       : <Crown className="h-3 w-3 flex-shrink-0" />
                     }
-                    <span className="truncate">{bossBlock.definition.name}</span>
+                    <span className="truncate">🔒 {bossBlock.definition.name}</span>
                     <Badge className="text-[9px] px-1 h-4 ml-auto"
                       style={{
                         background: bossIsLastResort ? `#ef444420` : `${bossColor}20`,
@@ -1069,8 +1070,8 @@ const BlockPuzzleAssistant: React.FC = () => {
                   </div>
                   <p className="text-[10px] text-muted-foreground leading-snug mt-0.5">
                     {bossIsLastResort
-                      ? <><AlertTriangle className="h-2.5 w-2.5 inline mr-0.5" />Dernier recours — aucun autre bloc disponible.</>
-                      : <>Zone réservée L{bossReservation.row + 1}C{bossReservation.col + 1}. Posez d'abord les autres.</>
+                      ? <><AlertTriangle className="h-2.5 w-2.5 inline mr-0.5" />Dernier recours — ce bloc est le seul plaçable.</>
+                      : <>Bloc réservé : correspond à ta zone marquée. Joue les autres blocs d'abord.</>
                     }
                   </p>
                 </div>
@@ -1095,6 +1096,7 @@ const BlockPuzzleAssistant: React.FC = () => {
                     hoveredSuggestion={hoveredSuggestion}
                     onHoverSuggestion={handleHoverSuggestion}
                     onApplySuggestion={handleApplySuggestion}
+                    onSuggestionDetail={setDetailSuggestion}
                   />
                 )}
               </div>
@@ -1219,6 +1221,26 @@ const BlockPuzzleAssistant: React.FC = () => {
 
         </div>
       </main>
+
+      {/* Détails d'une suggestion */}
+      {(() => {
+        if (!detailSuggestion) return null;
+        const all = Object.entries(suggestions)
+          .flatMap(([, arr]) => arr);
+        const idx = all.findIndex(s => s.id === detailSuggestion.id);
+        const rank = idx >= 0 ? idx + 1 : 1;
+        const slot = Object.entries(suggestions)
+          .find(([, arr]) => arr.some(s => s.id === detailSuggestion.id))?.[0];
+        return (
+          <SuggestionDetailModal
+            suggestion={detailSuggestion}
+            slotLabel={slot ? `Slot ${parseInt(slot) + 1}` : ''}
+            rank={rank}
+            open={detailSuggestion !== null}
+            onOpenChange={(open) => { if (!open) setDetailSuggestion(null); }}
+          />
+        );
+      })()}
     </div>
   );
 };

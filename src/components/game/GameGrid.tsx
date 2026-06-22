@@ -398,7 +398,7 @@ export const GameGrid: React.FC<GameGridProps> = ({
         {reservedZoneCells && reservedZoneCells.size > 0 && !activeDragPreview && !activeKbPreview && (
           <div className="flex items-center gap-1">
             <div className="w-3 h-3 rounded-sm" style={{ border: `2px dashed ${effectiveBossColor}`, backgroundColor: `${effectiveBossColor}14` }} />
-            <span>Zone Boss</span>
+            <span>Zone réservée</span>
           </div>
         )}
         {(activeDragPreview || activeKbPreview) && (

@@ -10,9 +10,22 @@ import {
 } from '@/lib/blockUtils';
 import { BLOCK_CATALOG } from '@/data/blockCatalog';
 import type { UserHints } from '@/lib/aiNotes';
+import type { SpaceProject } from '@/lib/spaceProjectEngine';
+import { evaluateMove as spaceEvaluateMove } from '@/lib/spaceProjectEngine';
 
 const GRID_SIZE = 8;
 const MAX_SIM_DEPTH = 30;
+
+function getFilledProfile(grid: boolean[][]): { rows: number[]; cols: number[] } {
+  const rows = new Array(GRID_SIZE).fill(0);
+  const cols = new Array(GRID_SIZE).fill(0);
+  for (let r = 0; r < GRID_SIZE; r++) {
+    for (let c = 0; c < GRID_SIZE; c++) {
+      if (grid[r][c]) { rows[r]++; cols[c]++; }
+    }
+  }
+  return { rows, cols };
+}
 
 const COMBO_BONUS = [0, 0, 0, 24, 64, 80, 96];
 const comboBonus = (n: number): number =>
@@ -32,6 +45,7 @@ const DEFAULT_CONFIG: MCTSConfig = {
 // (module-level car on est dans un Worker — pas de concurrence)
 let _reservedCells: Set<string> | undefined;
 let _bossSlot: number | undefined;
+let _spaceProject: SpaceProject | undefined;
 
 // ─── Types internes ──────────────────────────────────────────────────────────
 
@@ -366,12 +380,18 @@ function rolloutState(state: SimState, config: MCTSConfig, depth = 0): number {
   if (Math.random() < config.rolloutEpsilon) {
     chosen = placements[Math.floor(Math.random() * placements.length)];
   } else {
-    // Choisir le meilleur placement selon heuristique rapide
+    // Choisir le meilleur placement selon heuristique (projet-aware si disponible)
     let bestScore = -Infinity;
     let bestIdx = 0;
     for (let i = 0; i < placements.length; i++) {
       const p = placements[i];
-      const h = heuristicScore(state.grid, p.shape, p.row, p.col, p.linesCleared, p.colsCleared);
+      let h: number;
+      if (_spaceProject) {
+        const eval_ = spaceEvaluateMove(_spaceProject, state.grid, p.shape, p.row, p.col, _reservedCells);
+        h = eval_.score;
+      } else {
+        h = heuristicScore(state.grid, p.shape, p.row, p.col, p.linesCleared, p.colsCleared);
+      }
       if (h > bestScore) {
         bestScore = h;
         bestIdx = i;
@@ -477,12 +497,15 @@ export function generateMCSTSuggestions(
   _hints?: UserHints,
   config?: Partial<MCTSConfig>,
   reservedCells?: Set<string>,
-  bossSlot?: number
+  bossSlot?: number,
+  spaceProject?: SpaceProject | null,
 ): Record<number, Suggestion[]> {
   const boolGrid = gridToBool(grid);
 
   // Si main vide → pas de suggestions
   if (hand.every(b => b === null)) return { 0: [], 1: [], 2: [] };
+
+  _spaceProject = spaceProject ?? undefined;
 
   // Initialiser le contexte global pour les fonctions internes
   _reservedCells = reservedCells;
@@ -534,6 +557,36 @@ export function generateMCSTSuggestions(
             i === p.slotIndex ? '📌' : hand[i] ? '▢' : '·'
           ).join(' ');
 
+          const scoreBreakdown = [
+            { label: 'Score moyen des simulations', value: Math.round(avgScore), icon: '📊' },
+            { label: 'Score immédiat du placement', value: n.state.score, icon: '⚡' },
+            { label: 'Simulations explorées', value: n.visits, icon: '🔄' },
+          ];
+          if (futureCombo > 0) {
+            scoreBreakdown.push({ label: 'Lignes/cols quasi-complètes', value: futureCombo, icon: '🎯' });
+          }
+
+          let summary: string;
+          if (_spaceProject) {
+            summary = `🔮 MCTS a exploré ${n.visits} futurs depuis ce placement`;
+            if (pctOfBest !== '0') summary += ` (${pctOfBest}% de l'arbre total)`;
+            summary += `. Score moyen : ⌀${Math.round(avgScore).toLocaleString()} points.`;
+            if (p.linesCleared + p.colsCleared > 0) {
+              summary += ` Efface immédiatement ${p.linesCleared}L+${p.colsCleared}C.`;
+            }
+            const { rows, cols } = getFilledProfile(n.state.grid);
+            const nearComplete = rows.filter(r => r >= 6).length + cols.filter(c => c >= 6).length;
+            if (nearComplete > 0) {
+              summary += ` Après placement, ${nearComplete} ligne${nearComplete > 1 ? 's' : ''}/colonne${nearComplete > 1 ? 's' : ''} proche${nearComplete > 1 ? 's' : ''} de la complétion.`;
+            }
+          } else {
+            summary = `🔮 MCTS a exploré ${n.visits} parties futures depuis ce placement de ${p.blockInstance.definition.name} en L${p.row + 1}·C${p.col + 1}.`;
+            if (p.linesCleared + p.colsCleared > 0) {
+              summary += ` Efface ${p.linesCleared}L+${p.colsCleared}C.`;
+            }
+            summary += ` Score moyen estimé : ⌀${Math.round(avgScore).toLocaleString()}.`;
+          }
+
           return {
             id: `${p.blockInstance.definition.id}-${p.blockInstance.rotation}-${p.blockInstance.flipped}-${p.row}-${p.col}`,
             blockInstance: p.blockInstance,
@@ -547,6 +600,7 @@ export function generateMCSTSuggestions(
             clearedCols: [],
             futureComboLines: futureCombo,
             comboLabel: `🎯 ${pctOfBest}% · ${n.visits} sims · ⌀${Math.round(avgScore).toLocaleString()} · ${slotsStr} · ${totalMs}ms`,
+            reasoning: { summary, details: [], scoreBreakdown },
           };
         })
         .sort((a, b) => b.score - a.score)
@@ -574,6 +628,7 @@ export function generateMCSTSuggestions(
     // Nettoyer le contexte global quoi qu'il arrive
     _reservedCells = undefined;
     _bossSlot = undefined;
+    _spaceProject = undefined;
   }
 }
 

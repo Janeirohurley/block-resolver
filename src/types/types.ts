@@ -42,6 +42,11 @@ export interface Suggestion {
   clearedCols: number[];   // indices des colonnes libérées
   futureComboLines?: number; // nombre de lignes/cols proches de la complétion après placement
   comboLabel?: string;       // étiquette lisible du potentiel combo
+  reasoning?: {
+    summary: string;
+    details: { label: string; value: string; icon: string }[];
+    scoreBreakdown: { label: string; value: number; icon: string }[];
+  };
 }
 
 export interface HandBlock {

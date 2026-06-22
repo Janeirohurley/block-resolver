@@ -24,6 +24,11 @@ import {
 } from '@/lib/aiCache';
 import type { UserHints } from '@/lib/aiNotes';
 import { DEFAULT_HINTS } from '@/lib/aiNotes';
+import type { SpaceProject } from '@/lib/spaceProjectEngine';
+import {
+  generateProjectSuggestions,
+  suggestNextBlockForProject,
+} from '@/lib/spaceProjectEngine';
 
 const GRID_SIZE = 8;
 
@@ -652,6 +657,59 @@ export function reservationToCellSet(reservation: BossReservation | null): Set<s
   return new Set(reservation.cells.map(([r, c]) => `${r},${c}`));
 }
 
+/**
+ * Convertit un Set<string> de cellules réservées en BossReservation.
+ */
+export function cellSetToReservation(
+  cells: Set<string>,
+  slot: number
+): BossReservation | null {
+  if (cells.size === 0) return null;
+  const cellArray: [number, number][] = [];
+  for (const key of cells) {
+    const [r, c] = key.split(',').map(Number);
+    cellArray.push([r, c]);
+  }
+  const minRow = Math.min(...cellArray.map(([r]) => r));
+  const minCol = Math.min(...cellArray.map(([, c]) => c));
+  return { row: minRow, col: minCol, bossSlot: slot, cells: cellArray };
+}
+
+/**
+ * Trouve quel slot de la main contient un bloc qui peut se placer
+ * entièrement dans la zone réservée manuellement.
+ * Retourne -1 si aucun bloc ne correspond.
+ */
+export function findReservedBlockSlot(
+  grid: boolean[][],
+  hand: Array<BlockInstance | null>,
+  reservedCells: Set<string>
+): number {
+  if (reservedCells.size === 0) return -1;
+  for (let slot = 0; slot < hand.length; slot++) {
+    const block = hand[slot];
+    if (!block) continue;
+    const transforms = getUniqueTransforms(block.definition, block.color);
+    for (const instance of transforms) {
+      const shape = getInstanceShape(instance);
+      for (let row = 0; row < GRID_SIZE; row++) {
+        for (let col = 0; col < GRID_SIZE; col++) {
+          if (!canPlace(grid, shape, row, col)) continue;
+          let allInReserved = true;
+          for (const [dr, dc] of shape) {
+            if (!reservedCells.has(`${row + dr},${col + dc}`)) {
+              allInReserved = false;
+              break;
+            }
+          }
+          if (allInReserved) return slot;
+        }
+      }
+    }
+  }
+  return -1;
+}
+
 function reservationFingerprint(reservation: BossReservation | null): string {
   if (!reservation) return '0';
   return `${reservation.bossSlot}:${reservation.row}:${reservation.col}:${reservation.cells.map(([r, c]) => `${r},${c}`).join(';')}`;
@@ -675,8 +733,14 @@ export function generateSuggestions(
   maxPerBlock = 3,
   bossReservation: BossReservation | null = null,
   memory: ClearMemory[] = [],
-  hints: UserHints = DEFAULT_HINTS
+  hints: UserHints = DEFAULT_HINTS,
+  spaceProject?: SpaceProject | null,
+  manualReservedCells?: Set<string>,
 ): Record<number, Suggestion[]> {
+  // Si un projet Espace actif existe, utiliser le moteur projet
+  if (spaceProject) {
+    return generateProjectSuggestions(grid, hand, spaceProject, maxPerBlock, manualReservedCells);
+  }
   const boolGrid = gridToBool(grid);
   const fp = gridFingerprint(boolGrid);
   const handIds = hand.map(b =>
@@ -696,7 +760,13 @@ export function generateSuggestions(
   if (cached !== undefined) return cached as Record<number, Suggestion[]>;
 
   const result: Record<number, Suggestion[]> = {};
-  const reservedCells = reservationToCellSet(bossReservation);
+  const autoReserved = reservationToCellSet(bossReservation);
+  const reservedCells = (() => {
+    if (!manualReservedCells || manualReservedCells.size === 0) return autoReserved;
+    const merged = new Set(autoReserved);
+    for (const key of manualReservedCells) merged.add(key);
+    return merged;
+  })();
   const bossSlot = bossReservation?.bossSlot ?? findBossSlot(hand, grid);
 
   // ── Étape 1 : calculer les suggestions pour tous les blocs ─────────────────
@@ -856,8 +926,14 @@ export function suggestOneBlock(
   excludeIds: string[] = [],
   bossReservation: BossReservation | null = null,
   memory: ClearMemory[] = [],
-  excludeSeries: string[] = []
+  excludeSeries: string[] = [],
+  spaceProject?: SpaceProject | null,
+  manualReservedCells?: Set<string>,
 ): BlockInstance | null {
+  // Si un projet Espace actif, l'utiliser pour le choix du bloc
+  if (spaceProject) {
+    return suggestNextBlockForProject(grid, colors, spaceProject, excludeIds, excludeSeries, manualReservedCells);
+  }
   const boolGrid = gridToBool(grid);
   const fp = gridFingerprint(boolGrid);
   const colorKey = colors.join(',');
@@ -870,7 +946,13 @@ export function suggestOneBlock(
   const cached = oneBlockCache.get(cacheKey);
   if (cached !== undefined) return cached as BlockInstance | null;
 
-  const reservedCells = reservationToCellSet(bossReservation);
+  const autoReserved = reservationToCellSet(bossReservation);
+  const reservedCells = (() => {
+    if (!manualReservedCells || manualReservedCells.size === 0) return autoReserved;
+    const merged = new Set(autoReserved);
+    for (const key of manualReservedCells) merged.add(key);
+    return merged;
+  })();
 
   const scored = BLOCK_CATALOG
     .filter(def => !excludeIds.includes(def.id) && !excludeSeries.includes(def.series))
