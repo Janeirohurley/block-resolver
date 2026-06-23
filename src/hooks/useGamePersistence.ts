@@ -4,7 +4,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import type { Grid, BlockInstance, CellState } from '@/types/types';
 import type { ClearMemory, BossReservation } from '@/lib/predictionEngine';
-import { BLOCK_CATALOG } from '@/data/blockCatalog';
+import { getBlockById } from '@/lib/blockCatalogService';
 
 const SAVE_KEY    = 'blockpuzzle_game_state';
 const SAVE_DELAY  = 800; // ms après le dernier changement
@@ -68,7 +68,7 @@ function serializeBlock(block: BlockInstance): SerializedBlock {
 }
 
 function deserializeBlock(data: SerializedBlock): BlockInstance | null {
-  const def = BLOCK_CATALOG.find(d => d.id === data.defId);
+  const def = getBlockById(data.defId);
   if (!def) return null;
   const validRotations: Array<0 | 90 | 180 | 270> = [0, 90, 180, 270];
   const rotation = validRotations.includes(data.rotation as 0 | 90 | 180 | 270)
@@ -91,7 +91,7 @@ function serializeBoss(res: BossReservation): SerializedBossReservation {
 }
 
 function deserializeBoss(data: SerializedBossReservation): BossReservation | null {
-  const def = BLOCK_CATALOG.find(d => d.id === data.bossBlockId);
+  const def = getBlockById(data.bossBlockId);
   if (!def) return null;
   const validRotations: Array<0 | 90 | 180 | 270> = [0, 90, 180, 270];
   const rotation = validRotations.includes(data.bossBlockRotation as 0 | 90 | 180 | 270)

@@ -1,0 +1,52 @@
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+build
+.turbo
+
+# Source control
+.git
+.gitignore
+
+# Development
+.env.local
+.env.*.local
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.coverage
+coverage
+
+# Other
+.cache
+tmp
+temp
+*.tmp
+
+# Documentation
+docs
+README.md
+
+# Rules and config
+.rules
+.skills
+tasks
+
+# History
+.aider.chat.history.md
+historical_context.txt
+session-*.md

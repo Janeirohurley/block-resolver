@@ -1,7 +1,7 @@
 // Moteur de projet Espace — Block Puzzle 8×8
 // Le joueur sculpte un espace vide en jouant. Le jeu donne des blocs qui rentrent dans cet espace.
 // Stratégie : identifier la zone de jeu active (le vide), jouer dedans, préparer des déclencheurs.
-import type { BlockInstance, Grid, BlockShape, Suggestion } from '@/types/types';
+import type { BlockInstance, BlockDefinition, Grid, BlockShape, Suggestion } from '@/types/types';
 import {
   getUniqueTransforms,
   getInstanceShape,
@@ -9,6 +9,12 @@ import {
   gridToBool,
 } from '@/lib/blockUtils';
 import { BLOCK_CATALOG } from '@/data/blockCatalog';
+
+let _catalog: BlockDefinition[] = BLOCK_CATALOG;
+
+export function setSPCatalog(catalog: BlockDefinition[]) {
+  _catalog = catalog;
+}
 
 const GRID_SIZE = 8;
 
@@ -438,7 +444,7 @@ export function suggestNextBlockForProject(
 ): BlockInstance | null {
   const boolGrid = boolGridFromGrid(grid);
 
-  const scored = BLOCK_CATALOG
+  const scored = _catalog
     .filter(def => !excludeIds.includes(def.id) && !excludeSeries.includes(def.series))
     .map((def, idx) => {
       const color = colors[idx % colors.length] || colors[0];
@@ -467,7 +473,7 @@ export function suggestNextBlockForProject(
         ? { def, color, score: bestScore }
         : null;
     })
-    .filter((x): x is { def: typeof BLOCK_CATALOG[0]; color: string; score: number } => x !== null);
+    .filter((x): x is { def: BlockDefinition; color: string; score: number } => x !== null);
 
   scored.sort((a, b) => b.score - a.score);
   if (scored.length === 0) return null;

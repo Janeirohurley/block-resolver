@@ -4,6 +4,20 @@ import type { BossReservation } from '@/lib/predictionEngine';
 import { findReservedBlockSlot, computeBestBlockReservation, reservationToCellSet } from '@/lib/predictionEngine';
 import { gridToBool } from '@/lib/blockUtils';
 
+function pickRandom<T>(arr: T[]): T {
+  const top = arr.slice(0, Math.min(3, arr.length));
+  return top[Math.floor(Math.random() * top.length)];
+}
+
+function shuffleArray<T>(arr: T[]): T[] {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
 export interface AutoPlayDeps {
   grid: Grid;
   hand: Array<BlockInstance | null>;
@@ -109,15 +123,16 @@ export function useAutoPlay(
     }
     analysisRequestedRef.current = false;
 
-    // Step 4: Try to play a non-boss block
+    // Step 4: Try to play a non-boss block (variété : ordre aléatoire + top 3 aléatoire)
     const nonBossSlots = hand
       .map((b, i) => (b && i !== bossSlot ? i : -1))
       .filter(i => i >= 0);
-    for (const slotIdx of nonBossSlots) {
+    for (const slotIdx of shuffleArray(nonBossSlots)) {
       const slotSuggestions = suggestions[slotIdx];
       if (slotSuggestions?.length > 0) {
-        callbacksRef.current.onApplySuggestion(slotSuggestions[0]);
-        setStatus(`Joue ${slotSuggestions[0].blockInstance.definition.name}`);
+        const pick = pickRandom(slotSuggestions);
+        callbacksRef.current.onApplySuggestion(pick);
+        setStatus(`Joue ${pick.blockInstance.definition.name}`);
         scheduleNext(400);
         return;
       }
@@ -131,10 +146,11 @@ export function useAutoPlay(
       return;
     }
 
-    // Step 6: Try to play the boss block
+    // Step 6: Try to play the boss block (variété : top 3 aléatoire)
     const bossSuggestions = suggestions[bossSlot];
     if (bossSuggestions?.length > 0) {
-      callbacksRef.current.onApplySuggestion(bossSuggestions[0]);
+      const pick = pickRandom(bossSuggestions);
+      callbacksRef.current.onApplySuggestion(pick);
       setStatus('🔥 BOSS ! Clear massif !');
       scheduleNext(1000);
       return;

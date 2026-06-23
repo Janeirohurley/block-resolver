@@ -223,6 +223,23 @@ function evaluateGrid(grid: boolean[][]): number {
   );
 }
 
+// ─── Catalogue dynamique (static + personnalisé) ──────────────────────────
+
+let _catalog: BlockDefinition[] = BLOCK_CATALOG;
+
+export function setCatalog(catalog: BlockDefinition[]) {
+  _catalog = catalog;
+  // Invalidate caches that depend on catalog
+  nextBlocksCache.clear();
+  oneBlockCache.clear();
+  placabilityCache.clear();
+  suggestionsCache.clear();
+}
+
+export function getCatalog(): BlockDefinition[] {
+  return _catalog;
+}
+
 // ─── Échantillonnage représentatif du catalogue ──────────────────────────────
 
 /**
@@ -230,23 +247,23 @@ function evaluateGrid(grid: boolean[][]): number {
  * pour simuler les blocs futurs inconnus du joueur.
  * Couvre les différentes tailles et formes du catalogue.
  */
-function sampleCatalog(): typeof BLOCK_CATALOG {
-  if (BLOCK_CATALOG.length <= CATALOG_SAMPLE_SIZE) return BLOCK_CATALOG;
+function sampleCatalog(): BlockDefinition[] {
+  if (_catalog.length <= CATALOG_SAMPLE_SIZE) return _catalog;
 
   // Grouper par taille
-  const bySize: Record<number, typeof BLOCK_CATALOG> = {};
-  for (const def of BLOCK_CATALOG) {
+  const bySize: Record<number, BlockDefinition[]> = {};
+  for (const def of _catalog) {
     if (!bySize[def.size]) bySize[def.size] = [];
     bySize[def.size].push(def);
   }
 
-  const sample: typeof BLOCK_CATALOG = [];
+  const sample: BlockDefinition[] = [];
   const sizes = Object.keys(bySize).map(Number).sort();
 
   // Proportionnel à la représentation dans le catalogue
   for (const size of sizes) {
     const group = bySize[size];
-    const proportion = Math.max(1, Math.round((group.length / BLOCK_CATALOG.length) * CATALOG_SAMPLE_SIZE));
+    const proportion = Math.max(1, Math.round((group.length / _catalog.length) * CATALOG_SAMPLE_SIZE));
     // Prendre des éléments espacés régulièrement dans le groupe
     const step = Math.max(1, Math.floor(group.length / proportion));
     for (let i = 0; i < group.length && sample.length < CATALOG_SAMPLE_SIZE; i += step) {
@@ -258,8 +275,8 @@ function sampleCatalog(): typeof BLOCK_CATALOG {
 }
 
 // Cache de l'échantillon (stable pendant la session)
-let _catalogSample: typeof BLOCK_CATALOG | null = null;
-function getCatalogSample(): typeof BLOCK_CATALOG {
+let _catalogSample: BlockDefinition[] | null = null;
+function getCatalogSample(): BlockDefinition[] {
   if (!_catalogSample) _catalogSample = sampleCatalog();
   return _catalogSample;
 }
@@ -856,7 +873,7 @@ export function suggestNextBlocks(
   if (cached !== undefined) return cached as BlockInstance[];
 
   // Scorer chaque bloc du catalogue sur son MEILLEUR placement possible
-  const scored = BLOCK_CATALOG.map((def, idx) => {
+  const scored = _catalog.map((def, idx) => {
     const color = colors[idx % colors.length] || colors[0];
     const transforms = getUniqueTransforms(def, color);
 
@@ -963,7 +980,7 @@ export function suggestOneBlock(
     return merged;
   })();
 
-  const scored = BLOCK_CATALOG
+  const scored = _catalog
     .filter(def => !excludeIds.includes(def.id) && !excludeSeries.includes(def.series))
     .map((def, idx) => {
       const color = colors[idx % colors.length] || colors[0];
@@ -984,7 +1001,7 @@ export function suggestOneBlock(
       if (bestScore === -Infinity) return null;
       return { def, color, score: bestScore };
     })
-    .filter((x): x is { def: typeof BLOCK_CATALOG[0]; color: string; score: number } => x !== null);
+    .filter((x): x is { def: BlockDefinition; color: string; score: number } => x !== null);
 
   scored.sort((a, b) => b.score - a.score);
   if (scored.length === 0) {
@@ -1006,7 +1023,7 @@ export function suggestOneBlock(
 export function computeBestBlockReservation(
   grid: boolean[][],
 ): { blockDef: BlockDefinition; cells: Array<[number, number]>; row: number; col: number } | null {
-  const sorted = [...BLOCK_CATALOG].sort((a, b) => b.size - a.size);
+  const sorted = [..._catalog].sort((a, b) => b.size - a.size);
   for (const def of sorted) {
     const transforms = getUniqueTransforms(def, '#000000');
     for (const instance of transforms) {

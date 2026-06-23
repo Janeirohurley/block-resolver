@@ -7,6 +7,7 @@ import {
   reservationToCellSet,
   cellSetToReservation,
   findReservedBlockSlot,
+  setCatalog as setPredictCatalog,
 } from '@/lib/predictionEngine';
 import type { ClearMemory, BossReservation } from '@/lib/predictionEngine';
 import { computeBestBlockReservation } from '@/lib/predictionEngine';
@@ -28,9 +29,10 @@ import { ActivityPanel } from '@/components/game/ActivityPanel';
 import { AiNotesPanel } from '@/components/game/AiNotesPanel';
 import { useActivityLog } from '@/hooks/useActivityLog';
 import { useAutoPlay } from '@/hooks/useAutoPlay';
+import * as blockCatalogService from '@/lib/blockCatalogService';
 import { ThemeProvider, useTheme } from '@/contexts/ThemeContext';
 import type { SpaceProject } from '@/lib/spaceProjectEngine';
-import { createSpaceProject } from '@/lib/spaceProjectEngine';
+import { createSpaceProject, setSPCatalog } from '@/lib/spaceProjectEngine';
 import { SuggestionDetailModal } from '@/components/game/SuggestionDetailModal';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
@@ -109,9 +111,37 @@ const BlockPuzzleAssistant: React.FC = () => {
   const workerRef = useRef<Worker | null>(null);
   const analyzeReqIdRef = useRef(0);
   const isAnalyzingRef = useRef(false);
+  const autoAnalyzeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const triggerAutoAnalyzeRef = useRef(false);
+  const handleAnalyzeRef = useRef<() => void>(() => {});
+
+  // ── Auto-analyse après changement de main ──────────────────────────────
+  useEffect(() => {
+    if (!triggerAutoAnalyzeRef.current) return;
+    if (autoAnalyzeTimerRef.current) clearTimeout(autoAnalyzeTimerRef.current);
+    autoAnalyzeTimerRef.current = setTimeout(() => {
+      triggerAutoAnalyzeRef.current = false;
+      handleAnalyzeRef.current();
+    }, 300);
+    return () => {
+      if (autoAnalyzeTimerRef.current) clearTimeout(autoAnalyzeTimerRef.current);
+    };
+  }, [hand]);
 
   // Sync learningMode ref
   useEffect(() => { learningModeRef.current = learningMode; }, [learningMode]);
+
+  // ── Synchroniser le catalogue dynamique dans les moteurs ──────────────────
+  useEffect(() => {
+    function syncCatalog() {
+      const all = blockCatalogService.getAllBlocks();
+      setPredictCatalog(all);
+      setSPCatalog(all);
+    }
+    syncCatalog();
+    const unsub = blockCatalogService.subscribe(syncCatalog);
+    return unsub;
+  }, []);
 
   // ── MCTS Worker (thread séparé pour ne pas bloquer l'UI) ────────────────
   useEffect(() => {
@@ -240,6 +270,30 @@ const BlockPuzzleAssistant: React.FC = () => {
     }
   }, [boolGrid, manualReservedCells.size, bossReservation, grid, theme.accentColor, bossSlot, logInstant]);
 
+  // ── Vérification validité de la réservation ────────────────────────────
+  useEffect(() => {
+    if (!bossReservation || manualReservedCells.size > 0) return;
+
+    // Bug 2: le block réservé existe-t-il toujours dans le catalogue ?
+    const bossBlockDef = bossReservation.bossBlock?.definition;
+    if (bossBlockDef) {
+      const exists = blockCatalogService.getBlockById(bossBlockDef.id);
+      if (!exists) {
+        setBossReservation(null);
+        logInstant('Réservation annulée — bloc supprimé du catalogue', 'warn', bossBlockDef.name);
+        return;
+      }
+    }
+
+    // Bug 1: des cellules réservées sont-elles occupées par un non-boss ?
+    const violated = bossReservation.cells.some(([r, c]) => grid[r]?.[c]?.occupied);
+    if (violated) {
+      setBossReservation(null);
+      triggerAutoAnalyzeRef.current = true;
+      logInstant('Zone réservée violée — nouvelle réservation', 'warn', '');
+    }
+  }, [grid, bossReservation, manualReservedCells, logInstant]);
+
   const occupiedCount = grid.flat().filter(c => c.occupied).length;
 
   // ── Peinture manuelle ────────────────────────────────────────────────────
@@ -286,6 +340,7 @@ const BlockPuzzleAssistant: React.FC = () => {
         return next;
       });
       setSuggestions({});
+      triggerAutoAnalyzeRef.current = true;
       setHasAnalyzed(false);
     },
     []
@@ -320,6 +375,7 @@ const BlockPuzzleAssistant: React.FC = () => {
         return next;
       });
       setSuggestions({});
+      triggerAutoAnalyzeRef.current = true;
       setHasAnalyzed(false);
       finishActivity(actId, ms < 2 ? 'cached' : 'done', `→ ${coloredBlock.definition.name}`);
       refreshCacheStats();
@@ -476,8 +532,11 @@ const BlockPuzzleAssistant: React.FC = () => {
       reservedCells,
       bossSlot: bossReservation?.bossSlot,
       spaceProject: spaceProjectRef.current,
+      catalog: blockCatalogService.getAllBlocks(),
     });
   }, [grid, hand, bossReservation, notes, activeNotesCount, startActivity, finishActivity, refreshCacheStats, spaceProjectRef]);
+
+  handleAnalyzeRef.current = handleAnalyze;
 
   // ── Effacer la grille ────────────────────────────────────────────────────
   const handleClearGrid = useCallback(() => {

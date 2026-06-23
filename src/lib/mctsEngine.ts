@@ -46,6 +46,7 @@ const DEFAULT_CONFIG: MCTSConfig = {
 let _reservedCells: Set<string> | undefined;
 let _bossSlot: number | undefined;
 let _spaceProject: SpaceProject | undefined;
+let _catalog: BlockDefinition[] = BLOCK_CATALOG;
 
 // ─── Types internes ──────────────────────────────────────────────────────────
 
@@ -90,7 +91,8 @@ const transformCache = new Map<string, PrecomputedBlock>();
 
 function ensureTransforms(): void {
   if (transformCache.size > 0) return;
-  for (const def of BLOCK_CATALOG) {
+  transformCache.clear();
+  for (const def of _catalog) {
     const instances = getUniqueTransforms(def, '#000000');
     const transforms = instances.map(inst => ({
       shape: getInstanceShape(inst),
@@ -189,14 +191,14 @@ function evalGridFast(grid: boolean[][]): number {
 // ─── Génération de blocs aléatoires pour les simulations ─────────────────
 
 function randomBlocks(count: number): BlockInstance[] {
-  if (BLOCK_CATALOG.length === 0) return [];
+  if (_catalog.length === 0) return [];
   const result: BlockInstance[] = [];
   const used = new Set<string>();
   for (let i = 0; i < count; i++) {
     let pick: BlockDefinition;
     let attempts = 0;
     do {
-      pick = BLOCK_CATALOG[Math.floor(Math.random() * BLOCK_CATALOG.length)];
+      pick = _catalog[Math.floor(Math.random() * _catalog.length)];
       attempts++;
     } while (used.has(pick.id) && attempts < 20);
     used.add(pick.id);
@@ -504,6 +506,7 @@ export function generateMCSTSuggestions(
   reservedCells?: Set<string>,
   bossSlot?: number,
   spaceProject?: SpaceProject | null,
+  catalog?: BlockDefinition[],
 ): Record<number, Suggestion[]> {
   const boolGrid = gridToBool(grid);
 
@@ -511,6 +514,7 @@ export function generateMCSTSuggestions(
   if (hand.every(b => b === null)) return { 0: [], 1: [], 2: [] };
 
   _spaceProject = spaceProject ?? undefined;
+  _catalog = catalog ?? BLOCK_CATALOG;
 
   // Initialiser le contexte global pour les fonctions internes
   _reservedCells = reservedCells;
@@ -619,12 +623,48 @@ export function generateMCSTSuggestions(
       if (!result[i]) result[i] = [];
     }
 
-    // ── Règle du dernier recours : supprimer le boss si d'autres blocs ont des placements ──
+    // ── Règle du boss : prioritaire quand réservation active ──
     if (bossSlot !== undefined && bossSlot >= 0) {
       const nonBossHasPlacements = Object.entries(result)
         .some(([slotIdx, suggestions]) => parseInt(slotIdx) !== bossSlot && suggestions.length > 0);
-      if (nonBossHasPlacements) {
+      if (nonBossHasPlacements && (!_reservedCells || _reservedCells.size === 0)) {
         result[bossSlot] = [];
+      }
+    }
+
+    // ── Fallback zone réservée : si aucune suggestion mais boss compatible ──
+    const hasAnySuggestions = Object.values(result).some(arr => arr.length > 0);
+    if (!hasAnySuggestions && _reservedCells && _reservedCells.size > 0 && bossSlot !== undefined) {
+      const bossBlock = hand[bossSlot];
+      if (bossBlock) {
+        const transforms = getUniqueTransforms(bossBlock.definition, bossBlock.color);
+        for (const instance of transforms) {
+          const shape = getInstanceShape(instance);
+          for (let row = 0; row < GRID_SIZE; row++) {
+            for (let col = 0; col < GRID_SIZE; col++) {
+              if (!canPlace(boolGrid, shape, row, col)) continue;
+              const allInReserved = shape.every(([dr, dc]) => _reservedCells!.has(`${row + dr},${col + dc}`));
+              if (allInReserved) {
+                const { linesCleared, colsCleared } = getClearsBool(boolGrid, shape, row, col);
+                const cellsFreed = linesCleared * GRID_SIZE + colsCleared * GRID_SIZE - linesCleared * colsCleared;
+                result[bossSlot] = [{
+                  id: `boss-fallback-${instance.rotation}-${instance.flipped ? 'f' : 'n'}-${row}-${col}`,
+                  blockInstance: { ...bossBlock, rotation: instance.rotation, flipped: instance.flipped },
+                  position: { row, col },
+                  score: 10000 + (linesCleared + colsCleared) * 500,
+                  linesCleared,
+                  colsCleared,
+                  cellsFreed,
+                  affectedCells: shape.map(([dr, dc]) => [row + dr, col + dc] as [number, number]),
+                  clearedLines: [],
+                  clearedCols: [],
+                }];
+                break;
+              }
+            }
+          }
+          if (result[bossSlot]?.length) break;
+        }
       }
     }
 
@@ -634,6 +674,7 @@ export function generateMCSTSuggestions(
     _reservedCells = undefined;
     _bossSlot = undefined;
     _spaceProject = undefined;
+    _catalog = BLOCK_CATALOG;
   }
 }
 
